@@ -1,0 +1,24 @@
+# Node.js
+node_modules/
+.pnpm-store/
+dist/
+build/
+.env
+.env.*
+!.env.example
+
+# SvelteKit
+.svelte-kit/
+
+# Rust
+/target/
+**/target/
+**/*.rs.bk
+
+# Max / IDEs
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+.cursorrules
+.cursorignore
