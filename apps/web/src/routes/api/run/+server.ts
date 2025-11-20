@@ -9,9 +9,18 @@ export async function POST({ request }) {
 
     console.log("Received request from UI:", body);
 
-    // Push to the SAME queue the Rust worker is listening to
-    // Note: We must stringify the body to send it as a JSON string
-    await redis.lpush('job_queue', JSON.stringify(body));
+    // NEW: Stream pattern
+    // Command: XADD stream_name ID field value
+    // '*' means "Redis, please generate a unique timestamp ID for me"
+    // 'payload' is the key where we store our JSON string
+    const streamId = await redis.xadd(
+        'swiftgrid_stream', 
+        '*', 
+        'payload', 
+        JSON.stringify(body)
+    );
 
-    return json({ success: true });
+    console.log(`Job added to Stream. ID: ${streamId}`);
+
+    return json({ success: true, streamId });
 }
