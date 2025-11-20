@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "gen:types": "typeshare ./apps/worker/src/main.rs --lang=typescript --output-file=./apps/web/src/lib/types/worker.ts"
   },
   "keywords": [],
   "author": "",
