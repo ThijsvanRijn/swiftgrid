@@ -2,8 +2,11 @@ use redis::{AsyncCommands, RedisResult, streams::{StreamReadOptions, StreamReadR
 use std::error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use typeshare::typeshare;
 use std::time::{SystemTime, UNIX_EPOCH};
+use typeshare::typeshare;
+use rquickjs::{AsyncContext, AsyncRuntime, Value};
+use tokio::sync::mpsc; // Channels
+use tokio::sync::oneshot; // One-way response channel
 
 // --- SHARED TYPES (Source of Truth) ---
 #[typeshare] 
@@ -15,16 +18,40 @@ pub enum HttpMethod {
 
 // The Instruction (Svelte -> Rust)
 #[typeshare]
-#[derive(Serialize, Deserialize, Debug)]
-struct HttpRequestNode {
-    id: String,
-    url: String,
-    method: HttpMethod, 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HttpNodeData {
+    pub url: String,
+    pub method: HttpMethod, 
     #[serde(default)] 
-    headers: Option<HashMap<String, String>>,
+    pub headers: Option<HashMap<String, String>>,
     #[typeshare(serialized_as = "any")]
     #[serde(default)]
-    body: Option<serde_json::Value>,
+    pub body: Option<serde_json::Value>,
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CodeNodeData {
+    pub code: String, // e.g. "return { sum: 1 + 2 };"
+    #[typeshare(serialized_as = "any")]
+    #[serde(default)]
+    pub inputs: Option<serde_json::Value>, // Data from previous nodes
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "data")] // Crucial for TypeScript Discriminated Union
+#[serde(rename_all = "UPPERCASE")]       // "HTTP" or "CODE"
+pub enum NodeType {
+    Http(HttpNodeData),
+    Code(CodeNodeData),
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug)]
+struct WorkerJob {
+    pub id: String,
+    pub node: NodeType,
 }
 
 // The Receipt (Rust -> Svelte)
@@ -39,119 +66,180 @@ struct ExecutionResult {
     timestamp: u64,
 }
 
-// Worker Logic
+// This is what we send to the dedicated JS thread (worker)
+struct JsTask {
+    code: String,
+    inputs: Option<serde_json::Value>,
+    // The channel to send the answer back to the main thread
+    responder: oneshot::Sender<Result<serde_json::Value, String>>,
+}
 
+// Worker Logic
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Get version from Cargo.toml
-    static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-    println!("SwiftGrid Worker ({}) initializing...", APP_USER_AGENT);
+    println!("SwiftGrid Worker initializing...");
 
     let client = redis::Client::open("redis://127.0.0.1/")?;
     let mut con = client.get_multiplexed_async_connection().await?;
     
+    static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
     let http_client = reqwest::Client::builder()
         .user_agent(APP_USER_AGENT)
         .build()?;
 
+    // 1. SPAWN DEDICATED JS THREAD
+    // We create a channel to talk to it.
+    let (js_sender, mut js_receiver) = mpsc::channel::<JsTask>(100);
+    
+    std::thread::spawn(move || {
+        // Create Runtime INSIDE this thread (It stays here forever)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async move {
+            let js_runtime = AsyncRuntime::new().unwrap();
+            let js_context = AsyncContext::full(&js_runtime).await.unwrap();
+
+            println!("JS Sandbox Ready.");
+
+            // Loop forever waiting for tasks
+            while let Some(task) = js_receiver.recv().await {
+                let result = run_js_safely(&js_context, task.code, task.inputs).await;
+                let _ = task.responder.send(result);
+            }
+        });
+    });
+
+    // 2. REDIS SETUP
     let stream_key = "swiftgrid_stream";
-    let result_stream_key = "swiftgrid_results"; // <--- NEW: Output Stream
+    let result_stream_key = "swiftgrid_results";
     let group_name = "workers_group";
     let consumer_name = "worker_1";
-
-    // Ensure Group Exists
     let _: RedisResult<()> = con.xgroup_create_mkstream(stream_key, group_name, "$").await;
 
-    println!("Listening on {}...", stream_key);
+    println!("Listening for jobs...");
 
     loop {
-        let opts = StreamReadOptions::default()
-            .group(group_name, consumer_name)
-            .count(1)
-            .block(0);
-
+        let opts = StreamReadOptions::default().group(group_name, consumer_name).count(1).block(0);
         let result: StreamReadReply = con.xread_options(&[stream_key], &[">"], &opts).await?;
 
         for stream_key_result in result.keys {
             for message in stream_key_result.ids {
-                let msg_id = message.id;
+                let msg_id = message.id.clone();
                 
                 if let Some(payload_str) = message.map.get("payload") {
-                    if let Ok(value_string) = redis::from_redis_value::<String>(payload_str) {
-                         match serde_json::from_str::<HttpRequestNode>(&value_string) {
-                            Ok(job) => {
-                                println!("Processing Node: {}", job.id);
+                    let payload_string: String = redis::from_redis_value(payload_str)?;
+                    
+                    match serde_json::from_str::<WorkerJob>(&payload_string) {
+                        Ok(job) => {
+                            println!("Processing Node: {} [{:?}]", job.id, job.node);
 
-                                let h_client = http_client.clone();
-                                let mut r_con = client.get_multiplexed_async_connection().await?;
-                                // We need the job ID inside the thread, so we clone it
-                                let job_id = job.id.clone();
-                                
-                                tokio::spawn(async move {
-                                    // Build Request
-                                    let reqwest_method: reqwest::Method = format!("{:?}", job.method).parse().unwrap();
-                                    let mut req = h_client.request(reqwest_method, &job.url);
-                                    
-                                    if let Some(h) = job.headers {
-                                        for (k,v) in h { req = req.header(k,v); }
-                                    }
-                                    if let Some(b) = job.body {
-                                        req = req.json(&b);
-                                    }
+                            let h_client = http_client.clone();
+                            let mut r_con = client.get_multiplexed_async_connection().await?;
+                            let job_id = job.id.clone();
+                            
+                            // Clone the channel sender so we can pass it to the task
+                            let j_sender = js_sender.clone();
 
-                                    // Execute & Capture Result
-                                    // We default to status 0/Error if network fails completely
-                                    let (status, body) = match req.send().await {
-                                        Ok(resp) => {
-                                            let s = resp.status().as_u16();
-                                            
-                                            // Handles Text & JSON
-                                            let text = resp.text().await.unwrap_or_default();
-                                            // Try to parse as JSON. If fails, wrap the raw text in a JSON String value.
-                                            let b = match serde_json::from_str::<serde_json::Value>(&text) {
-                                                Ok(json) => Some(json),
-                                                Err(_) => if text.is_empty() { None } else { Some(serde_json::Value::String(text)) }
-                                            };
-                                    
-                                            (s, b)
-                                        },
-                                        Err(e) => {
-                                            eprintln!("Network Fail: {}", e);
-                                            (0, None)
+                            tokio::spawn(async move {
+                                // EXECUTE BASED ON TYPE
+                                let (status, body) = match job.node {
+                                    NodeType::Http(data) => {
+                                        execute_http(h_client, data).await
+                                    }
+                                    NodeType::Code(data) => {
+                                        // Send to JS Thread and wait for answer
+                                        let (tx, rx) = oneshot::channel();
+                                        
+                                        let task = JsTask {
+                                            code: data.code,
+                                            inputs: data.inputs,
+                                            responder: tx
+                                        };
+
+                                        if j_sender.send(task).await.is_err() {
+                                            (500, Some(serde_json::json!({"error": "JS Engine crashed"})))
+                                        } else {
+                                            match rx.await {
+                                                Ok(Ok(val)) => (200, Some(val)),
+                                                Ok(Err(e)) => (400, Some(serde_json::json!({"error": e}))),
+                                                Err(_) => (500, Some(serde_json::json!({"error": "JS Timeout"})))
+                                            }
                                         }
-                                    };
+                                    }
+                                };
 
-                                    // Create Receipt
-                                    let receipt = ExecutionResult {
-                                        node_id: job_id,
-                                        status_code: status,
-                                        body,
-                                        timestamp: SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_millis() as u64,
-                                    };
+                                // SEND RECEIPT
+                                let receipt = ExecutionResult {
+                                    node_id: job_id,
+                                    status_code: status,
+                                    body,
+                                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+                                };
 
-                                    // Push Receipt to Redis
-                                    let receipt_json = serde_json::to_string(&receipt).unwrap();
-                                    let _: RedisResult<String> = r_con.xadd(
-                                        result_stream_key, 
-                                        "*", 
-                                        &[("payload", receipt_json)]
-                                    ).await;
-
-                                    println!("> Result stored for Node {}. Status: {}", receipt.node_id, status);
-
-                                    // Cleanup Input
-                                    let _: () = r_con.xack(stream_key, group_name, &[&msg_id]).await.unwrap();
-                                    let _: () = r_con.xdel(stream_key, &[&msg_id]).await.unwrap();
-                                });
-                            }
-                            Err(e) => eprintln!("JSON Error: {}", e),
+                                let receipt_json = serde_json::to_string(&receipt).unwrap();
+                                let _: RedisResult<String> = r_con.xadd(result_stream_key, "*", &[("payload", receipt_json)]).await;
+                                let _: () = r_con.xack(stream_key, group_name, &[&msg_id]).await.unwrap();
+                                let _: () = r_con.xdel(stream_key, &[&msg_id]).await.unwrap();
+                            });
                         }
+                        Err(e) => eprintln!("Failed to parse WorkerJob: {}", e),
                     }
                 }
             }
         }
     }
+}
+
+// --- LOGIC IMPLEMENTATIONS ---
+
+async fn execute_http(client: reqwest::Client, data: HttpNodeData) -> (u16, Option<serde_json::Value>) {
+    let reqwest_method: reqwest::Method = format!("{:?}", data.method).parse().unwrap();
+    let mut req = client.request(reqwest_method, &data.url);
+    if let Some(h) = data.headers { for (k,v) in h { req = req.header(k,v); } }
+    if let Some(b) = data.body { req = req.json(&b); }
+
+    match req.send().await {
+        Ok(resp) => {
+            let s = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let b = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(json) => Some(json),
+                Err(_) => if text.is_empty() { None } else { Some(serde_json::Value::String(text)) }
+            };
+            (s, b)
+        },
+        Err(e) => (500, Some(serde_json::json!({ "error": e.to_string() })))
+    }
+}
+
+// --- HELPER: JAVASCRIPT LOGIC ---
+async fn run_js_safely(ctx: &AsyncContext, code: String, inputs: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+
+    ctx.async_with(|ctx| Box::pin(async move { 
+        let input_json = serde_json::to_string(&inputs.unwrap_or(serde_json::json!({}))).unwrap_or("{}".into());
+        
+        let script = format!(
+            r#"
+            (function(INPUT) {{
+                {}
+            }})(JSON.parse('{}'))
+            "#,
+            code,
+            input_json
+        );
+
+        match ctx.eval::<Value, _>(script) {
+            Ok(v) => {
+                let json_func: rquickjs::Function = ctx.eval("JSON.stringify").unwrap();
+                match json_func.call::<_, String>((v,)) {
+                    Ok(json_str) => Ok(serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null)),
+                    Err(_) => Ok(serde_json::Value::Null)
+                }
+            },
+            Err(e) => Err(format!("JS Error: {}", e))
+        }
+    })).await
 }
