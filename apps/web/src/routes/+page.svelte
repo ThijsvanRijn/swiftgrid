@@ -12,14 +12,16 @@
 	import type { AppNode, AppNodeData } from '$lib/types/app';
 	
 	// 2. Import Worker types
-	import { type HttpRequestNode, HttpMethod } from '$lib/types/worker';
+	import { type WorkerJob, HttpMethod } from '$lib/types/worker';
 
 	// 3. Import your Custom Component
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
+	import CodeExecutionNodeComponent from '$lib/components/nodes/CodeExecutionNode.svelte';
 
 	// 4. Register the Custom Node Type
 	const nodeTypes = {
-		'http-request': HttpRequestNodeComponent
+		'http-request': HttpRequestNodeComponent,
+		'code-execution': CodeExecutionNodeComponent
 	};
 
 	// State uses the imported AppNode type
@@ -82,65 +84,107 @@
 		const node = nodes.find((n) => n.id === nodeId);
 		if (!node) return;
 
-		// 1. Validation
-		if (!node.data.url || !node.data.method) {
-			console.warn(`Skipping Node ${nodeId}: Missing Config`);
-			return;
-		}
-
-		// 2. Set UI to "Running"
+		// Set UI to "Running" immediately
 		updateNodeStatus(nodeId, 'running');
 
-		// --- THE BRAIN ACTIVATION (Data Passing Logic) ---
+		let payload: WorkerJob;
 
-		// A. Resolve URL variables
-		// "https://api.github.com/users/{{node_1.body.login}}" -> "https://api.github.com/users/torvalds"
-		const finalUrl = resolveVariables(node.data.url);
-
-		// B. Resolve Body variables
-		let finalBody = undefined;
-
-		let finalHeaders: Record<string, string> | undefined = undefined;
-
-		if (node.data.headers) {
-            finalHeaders = {};
-            for (const [key, val] of Object.entries(node.data.headers)) {
-                // Resolve {{node_1...}} in the header value
-                finalHeaders[key] = resolveVariables(String(val));
-            }
-        }
-		
-		if (node.data.body) {
-			// We treat the body as a string first so we can do the regex replacement
-			const bodyString = typeof node.data.body === 'string' 
-				? node.data.body 
-				: JSON.stringify(node.data.body);
+		// =================================================
+		// PATH A: CODE NODE
+		// =================================================
+		if (node.type === 'code-execution') {
+			// 1. Resolve "Inputs" (The JSON variables passed to JS)
+			let finalInputs = undefined;
 			
-			// "{"user": "{{node_1.body.login}}"}" -> "{"user": "torvalds"}"
-			const resolvedBodyString = resolveVariables(bodyString);
-
-			try {
-				// Try to convert it back to a real JSON object for the API
-				finalBody = JSON.parse(resolvedBodyString);
-			} catch (e) {
-				// If it fails (e.g. it's just plain text like "Hello {{name}}"), send as string
-				finalBody = resolvedBodyString;
+			if (node.data.inputs) {
+				// Treat as string for variable replacement {{...}}
+				const inputStr = typeof node.data.inputs === 'string' 
+					? node.data.inputs 
+					: JSON.stringify(node.data.inputs);
+				
+				const resolvedStr = resolveVariables(inputStr);
+				
+				try { 
+					finalInputs = JSON.parse(resolvedStr); 
+				} catch (e) {
+					console.warn(`Failed to parse Inputs JSON for Node ${nodeId}`, e);
+					// If parse fails, defaulting to empty object is safer for JS execution
+					finalInputs = {}; 
+				}
 			}
+
+			// 2. Construct Payload
+			payload = {
+				id: node.id,
+				node: {
+					type: 'CODE',
+					data: {
+						code: node.data.code || '',
+						inputs: finalInputs
+					}
+				}
+			};
+		} 
+		
+		// =================================================
+		// PATH B: HTTP NODE (Default)
+		// =================================================
+		else {
+			// 1. HTTP-Specific Validation
+			if (!node.data.url || !node.data.method) {
+				console.warn(`Skipping Node ${nodeId}: Missing URL or Method`);
+				// Reset status since we aren't running
+				updateNodeStatus(nodeId, 'idle'); 
+				return;
+			}
+
+			// 2. Resolve URL
+			const finalUrl = resolveVariables(node.data.url);
+
+			// 3. Resolve Headers
+			let finalHeaders: Record<string, string> | undefined = undefined;
+			if (node.data.headers) {
+				finalHeaders = {};
+				for (const [key, val] of Object.entries(node.data.headers)) {
+					finalHeaders[key] = resolveVariables(String(val));
+				}
+			}
+			
+			// 4. Resolve Body
+			let finalBody = undefined;
+			if (node.data.body) {
+				const bodyString = typeof node.data.body === 'string' 
+					? node.data.body 
+					: JSON.stringify(node.data.body);
+				
+				const resolvedBodyString = resolveVariables(bodyString);
+				try {
+					finalBody = JSON.parse(resolvedBodyString);
+				} catch (e) {
+					finalBody = resolvedBodyString;
+				}
+			}
+
+			// 5. Construct Payload
+			payload = {
+				id: node.id,
+				node: {
+					type: 'HTTP',
+					data: {
+						url: finalUrl,
+						method: node.data.method as HttpMethod,
+						headers: finalHeaders,
+						body: finalBody
+					}
+				}
+			};
 		}
-		// -------------------------------------------------
 
-		// 3. Construct Payload
-		const payload: HttpRequestNode = {
-			id: node.id,
-			url: finalUrl, 
-			method: node.data.method as HttpMethod,
-			headers: finalHeaders,
-			body: finalBody
-		};
+		console.log(`Executing ${node.type}`, payload);
 
-		console.log(`Executing Node ${nodeId} with Payload:`, payload);
-
-		// 4. Fire to Backend
+		// =================================================
+		// SEND TO BACKEND
+		// =================================================
 		try {
 			await fetch('/api/run', {
 				method: 'POST',
@@ -328,20 +372,24 @@
 	// Helper for random IDs
     const getId = () => `node_${Math.random().toString(36).substr(2, 9)}`;
 
-	function addNode() {
-        const newNode: AppNode = {
-            id: getId(),
-            type: 'http-request', 
-            data: {
-                label: 'New Request',
-                url: '',
-                method: 'GET',
-                status: 'idle'
-            },
-            position: { x: Math.random() * 400, y: Math.random() * 400 }
-        };
-        nodes = [...nodes, newNode];
-    }
+	function addNode(type: 'http' | 'code' = 'http') {
+		const isHttp = type === 'http';
+		
+		const newNode: AppNode = {
+			id: getId(),
+			type: isHttp ? 'http-request' : 'code-execution', // Switch type
+			data: {
+				label: isHttp ? 'New Request' : 'JS Logic',
+				// Initialize defaults based on type
+				url: isHttp ? '' : undefined,
+				method: isHttp ? 'GET' : undefined,
+				code: isHttp ? undefined : 'return { result: "Hello World" };',
+				status: 'idle'
+			},
+			position: { x: Math.random() * 400, y: Math.random() * 400 }
+		};
+		nodes = [...nodes, newNode];
+	}
 
     async function saveFlow() {
         // We send the raw arrays. Svelte 5 proxies (from $state) serialize fine via JSON.stringify
@@ -454,10 +502,16 @@
         </div>
 		<div class="flex gap-2">
 			<button 
-				onclick={addNode}
+				onclick={() => addNode('http')}
 				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 			>
-				+ Add Node
+				+ Add HTTP Node
+			</button>
+			<button 
+				onclick={() => addNode('code')}
+				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
+			>
+				+ Add Code Node
 			</button>
 			<button 
 				id="saveBtn"
@@ -575,115 +629,149 @@
 					
 					<!-- VIEW: CONFIGURATION -->
 					{#if activeTab === 'config'}
-						<!-- URL Input -->
-						<div class="flex flex-col gap-2">
-							<label for="url" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
-								Target URL
-							</label>
-							<input
-								id="url"
-								type="text"
-								value={selectedNode.data.url}
-								oninput={(e) => updateNodeData('url', e.currentTarget.value)}
-                            	class="border border-input bg-background p-2.5 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-shadow font-mono text-foreground"
-                            	placeholder="https://api.example.com"
-                            />
-						</div>
 
-						<!-- Method Input -->
-						<div class="flex flex-col gap-2">
-							<label for="method" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
-								HTTP Method
-							</label>
-							<select
-								id="method"
-								value={selectedNode.data.method}
-								onchange={(e) => updateNodeData('method', e.currentTarget.value)}
-								class="w-full border border-input bg-background p-2 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-all text-foreground"
-							>
-								<option value="GET">GET</option>
-								<option value="POST">POST</option>
-								<option value="PUT">PUT</option>
-								<option value="DELETE">DELETE</option>
-								<option value="PATCH">PATCH</option>
-							</select>
-						</div>
-
-						<!-- Headers Input -->
-						<div class="flex flex-col gap-2">
-							<div class="flex justify-between items-center">
-								<span class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
-									Headers
-								</span>
-								<button 
-									onclick={() => {
-										// Logic to add a temporary unique key
-										const key = `New-Header-${Math.floor(Math.random() * 100)}`;
-										updateHeaderValue(key, '');
-									}}
-									class="text-[10px] bg-accent hover:bg-accent-foreground text-accent-foreground px-2 py-1 rounded transition-colors"
-								>
-									+ Add
-								</button>
-							</div>
-							
-							{#if selectedNode.data.headers && Object.keys(selectedNode.data.headers).length > 0}
-								<div class="flex flex-col gap-2 border border-sidebar-border rounded p-2 bg-sidebar-accent">
-									{#each Object.entries(selectedNode.data.headers) as [key, value]}
-										<div class="flex gap-1 items-center">
-											<!-- Key Input -->
-											<input 
-												type="text" 
-												value={key}
-												onchange={(e) => updateHeaderKey(key, e.currentTarget.value)}
-												class="w-1/3 text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
-												placeholder="Key"
-											/>
-											<span class="text-slate-400">:</span>
-											<!-- Value Input -->
-											<input 
-												type="text" 
-												value={value}
-												oninput={(e) => updateHeaderValue(key, e.currentTarget.value)}
-												class="grow text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
-												placeholder="Value"
-											/>
-											<!-- Remove Button -->
-											<button 
-												onclick={() => removeHeader(key)}
-												class="text-slate-400 hover:text-red-500 px-1"
-												title="Remove Header"
-											>
-												&times;
-											</button>
-										</div>
-									{/each}
-								</div>
-							{:else}
-								 <div class="text-xs text-slate-400 italic p-2 border border-dashed border-slate-200 rounded">
-									No headers configured.
-								</div>
-							{/if}
-						</div>
-
-						<!-- JSON Body -->
-						<div class="flex flex-col gap-2 h-full">
-							<div class="flex justify-between items-center">
-								<label for="body" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
-									JSON Body
+						{#if selectedNode.type === 'http-request'}
+							<!-- HTTP NODE CONFIGURATION -->
+							<div class="flex flex-col gap-2">
+								<label for="url" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+									Target URL
 								</label>
-								<span class="text-[10px] text-muted-foreground bg-accent px-1 rounded">Optional</span>
+								<input
+									id="url"
+									type="text"
+									value={selectedNode.data.url}
+									oninput={(e) => updateNodeData('url', e.currentTarget.value)}
+									class="border border-input bg-background p-2.5 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-shadow font-mono text-foreground"
+									placeholder="https://api.example.com"
+								/>
 							</div>
-							<textarea
-								id="body"
-								value={typeof selectedNode.data.body === 'string' 
-									? selectedNode.data.body 
-									: (selectedNode.data.body ? JSON.stringify(selectedNode.data.body, null, 2) : '')}
-								oninput={(e) => updateNodeData('body', e.currentTarget.value)}
-								class="border border-slate-300 p-2 rounded-md text-xs font-mono grow min-h-[150px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-								placeholder={'{"key": "{{node_1.body.value}}", "secret": "{{$env.API_KEY}}"}'}
-							></textarea>
-						</div>
+
+							<!-- Method Input -->
+							<div class="flex flex-col gap-2">
+								<label for="method" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+									HTTP Method
+								</label>
+								<select
+									id="method"
+									value={selectedNode.data.method}
+									onchange={(e) => updateNodeData('method', e.currentTarget.value)}
+									class="w-full border border-input bg-background p-2 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-all text-foreground"
+								>
+									<option value="GET">GET</option>
+									<option value="POST">POST</option>
+									<option value="PUT">PUT</option>
+									<option value="DELETE">DELETE</option>
+									<option value="PATCH">PATCH</option>
+								</select>
+							</div>
+
+							<!-- Headers Input -->
+							<div class="flex flex-col gap-2">
+								<div class="flex justify-between items-center">
+									<span class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+										Headers
+									</span>
+									<button 
+										onclick={() => {
+											// Logic to add a temporary unique key
+											const key = `New-Header-${Math.floor(Math.random() * 100)}`;
+											updateHeaderValue(key, '');
+										}}
+										class="text-[10px] bg-accent hover:bg-accent-foreground text-accent-foreground px-2 py-1 rounded transition-colors"
+									>
+										+ Add
+									</button>
+								</div>
+								
+								{#if selectedNode.data.headers && Object.keys(selectedNode.data.headers).length > 0}
+									<div class="flex flex-col gap-2 border border-sidebar-border rounded p-2 bg-sidebar-accent">
+										{#each Object.entries(selectedNode.data.headers) as [key, value]}
+											<div class="flex gap-1 items-center">
+												<!-- Key Input -->
+												<input 
+													type="text" 
+													value={key}
+													onchange={(e) => updateHeaderKey(key, e.currentTarget.value)}
+													class="w-1/3 text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
+													placeholder="Key"
+												/>
+												<span class="text-slate-400">:</span>
+												<!-- Value Input -->
+												<input 
+													type="text" 
+													value={value}
+													oninput={(e) => updateHeaderValue(key, e.currentTarget.value)}
+													class="grow text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
+													placeholder="Value"
+												/>
+												<!-- Remove Button -->
+												<button 
+													onclick={() => removeHeader(key)}
+													class="text-slate-400 hover:text-red-500 px-1"
+													title="Remove Header"
+												>
+													&times;
+												</button>
+											</div>
+										{/each}
+									</div>
+								{:else}
+									<div class="text-xs text-slate-400 italic p-2 border border-dashed border-slate-200 rounded">
+										No headers configured.
+									</div>
+								{/if}
+							</div>
+
+							<!-- JSON Body -->
+							<div class="flex flex-col gap-2 h-full">
+								<div class="flex justify-between items-center">
+									<label for="body" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+										JSON Body
+									</label>
+									<span class="text-[10px] text-muted-foreground bg-accent px-1 rounded">Optional</span>
+								</div>
+								<textarea
+									id="body"
+									value={typeof selectedNode.data.body === 'string' 
+										? selectedNode.data.body 
+										: (selectedNode.data.body ? JSON.stringify(selectedNode.data.body, null, 2) : '')}
+									oninput={(e) => updateNodeData('body', e.currentTarget.value)}
+									class="border border-slate-300 p-2 rounded-md text-xs font-mono grow min-h-[150px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+									placeholder={'{"key": "{{node_1.body.value}}", "secret": "{{$env.API_KEY}}"}'}
+								></textarea>
+							</div>
+						{/if}
+
+						{#if selectedNode.type === 'code-execution'}
+							<!-- Javascript Code Editor -->
+							<div class="flex flex-col gap-2 h-64">
+								<label for="code" class="text-xs font-bold uppercase text-slate-500 tracking-wider">JavaScript Code</label>
+								<textarea
+									id="code"
+									value={selectedNode.data.code}
+									oninput={(e) => updateNodeData('code', e.currentTarget.value)}
+									class="border border-slate-300 bg-slate-900 text-green-400 p-3 rounded-md text-xs font-mono grow focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all"
+									placeholder={'return { value: 123 };'}
+									spellcheck="false"
+								></textarea>
+								<div class="text-[10px] text-slate-400">
+									Available: <code class="bg-slate-100 px-1">INPUT</code> variable contains mapped data.
+								</div>
+							</div>
+					
+							<!-- Inputs Mapping -->
+							<div class="flex flex-col gap-2">
+								<label for="inputs" class="text-xs font-bold uppercase text-slate-500 tracking-wider">Input Mapping (JSON)</label>
+								<textarea
+									id="inputs"
+									value={typeof selectedNode.data.inputs === 'string' ? selectedNode.data.inputs : JSON.stringify(selectedNode.data.inputs, null, 2)}
+									oninput={(e) => updateNodeData('inputs', e.currentTarget.value)}
+									class="border border-slate-300 p-2 rounded-md text-xs font-mono h-24 focus:outline-none focus:ring-2 focus:ring-purple-500"
+									placeholder={'{"arg1": "{{node_1.body.value}}"}'}
+								></textarea>
+							</div>
+						{/if}
+
 					{/if}
 
 					<!-- VIEW: SECRETS -->
