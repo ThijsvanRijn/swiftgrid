@@ -3,32 +3,31 @@
 		SvelteFlow,
 		Background,
 		Controls,
-		type Edge
-		// type Node is no longer needed here if we use AppNode
+		type Edge,
+		type Viewport,
+		type XYPosition
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
 
-	// 1. Import the shared types you created
+	// Shared app + worker types so the UI matches the backend shapes.
 	import type { AppNode, AppNodeData } from '$lib/types/app';
-	
-	// 2. Import Worker types
 	import { type WorkerJob, HttpMethod } from '$lib/types/worker';
 
-	// 3. Import your Custom Component
+	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
 	import CodeExecutionNodeComponent from '$lib/components/nodes/CodeExecutionNode.svelte';
 
-	// 4. Register the Custom Node Type
+	// Tell SvelteFlow which component goes with each node type.
 	const nodeTypes = {
 		'http-request': HttpRequestNodeComponent,
 		'code-execution': CodeExecutionNodeComponent
 	};
 
-	// State uses the imported AppNode type
+	// Keep node state typed so drag/drop stays predictable.
 	let nodes = $state.raw<AppNode[]>([
 		{
 			id: '1',
-			type: 'http-request', // Update this to use your new component!
+			type: 'http-request', // first node so the canvas isn't empty
 			data: {
 				label: 'HTTP Request',
 				url: 'https://api.github.com/zen',
@@ -41,9 +40,11 @@
 
 	let edges = $state.raw<Edge[]>([]);
 
+	let viewport = $state.raw<Viewport>({ x: 0, y: 0, zoom: 1 });
+	let flowWrapper: HTMLDivElement | null = null;
+
 	let selectedNodeId = $state<string | null>(null);
-	
-	// Derived value: automatically updates when selectedNodeId or nodes change
+	// Handy derived helper so the sidebar always has fresh data.
 	let selectedNode = $derived(nodes.find((n) => n.id === selectedNodeId));
 
 	/**
@@ -66,14 +67,10 @@
 		});
 	}
 
-	/**
-	 * Handle Node Click
-	 * We manually type the event object here since the specific handler type 
-	 * isn't strictly exported, but we know it contains the clicked node.
-	 */
+	// Clicking a node should focus the config tab for quick edits.
 	const onNodeClick = ({ node }: { node: AppNode }) => {
 		selectedNodeId = node.id;
-		activeTab = 'config'; 
+		activeTab = 'config';
 	};
 
 	const onPaneClick = () => {
@@ -89,31 +86,29 @@
 
 		let payload: WorkerJob;
 
-		// =================================================
-		// PATH A: CODE NODE
-		// =================================================
+		// --- Code node path ---
 		if (node.type === 'code-execution') {
-			// 1. Resolve "Inputs" (The JSON variables passed to JS)
+			// Pull inputs from the editor and resolve {{vars}} before running JS.
 			let finalInputs = undefined;
-			
+
 			if (node.data.inputs) {
 				// Treat as string for variable replacement {{...}}
-				const inputStr = typeof node.data.inputs === 'string' 
-					? node.data.inputs 
+				const inputStr = typeof node.data.inputs === 'string'
+					? node.data.inputs
 					: JSON.stringify(node.data.inputs);
-				
+
 				const resolvedStr = resolveVariables(inputStr);
-				
-				try { 
-					finalInputs = JSON.parse(resolvedStr); 
+
+				try {
+					finalInputs = JSON.parse(resolvedStr);
 				} catch (e) {
 					console.warn(`Failed to parse Inputs JSON for Node ${nodeId}`, e);
 					// If parse fails, defaulting to empty object is safer for JS execution
-					finalInputs = {}; 
+					finalInputs = {};
 				}
 			}
 
-			// 2. Construct Payload
+			// Build the worker payload for JS execution.
 			payload = {
 				id: node.id,
 				node: {
@@ -124,24 +119,22 @@
 					}
 				}
 			};
-		} 
-		
-		// =================================================
-		// PATH B: HTTP NODE (Default)
-		// =================================================
+		}
+
+		// --- HTTP node path ---
 		else {
-			// 1. HTTP-Specific Validation
+			// Quick guard so we don't fire empty requests.
 			if (!node.data.url || !node.data.method) {
 				console.warn(`Skipping Node ${nodeId}: Missing URL or Method`);
 				// Reset status since we aren't running
-				updateNodeStatus(nodeId, 'idle'); 
+				updateNodeStatus(nodeId, 'idle');
 				return;
 			}
 
-			// 2. Resolve URL
+			// Replace {{ }} inside the URL.
 			const finalUrl = resolveVariables(node.data.url);
 
-			// 3. Resolve Headers
+			// Clone headers and resolve each value.
 			let finalHeaders: Record<string, string> | undefined = undefined;
 			if (node.data.headers) {
 				finalHeaders = {};
@@ -149,14 +142,14 @@
 					finalHeaders[key] = resolveVariables(String(val));
 				}
 			}
-			
-			// 4. Resolve Body
+
+			// Allow body to stay JSON or fall back to a string.
 			let finalBody = undefined;
 			if (node.data.body) {
-				const bodyString = typeof node.data.body === 'string' 
-					? node.data.body 
+				const bodyString = typeof node.data.body === 'string'
+					? node.data.body
 					: JSON.stringify(node.data.body);
-				
+
 				const resolvedBodyString = resolveVariables(bodyString);
 				try {
 					finalBody = JSON.parse(resolvedBodyString);
@@ -165,7 +158,7 @@
 				}
 			}
 
-			// 5. Construct Payload
+			// Final worker payload for HTTP nodes.
 			payload = {
 				id: node.id,
 				node: {
@@ -198,92 +191,94 @@
 	}
 
 	// Helper: Dig into an object using a path string "body.html_url"
-    function getDeepValue(obj: any, path: string): any {
-        return path.split('.').reduce((acc, part) => acc && acc[part], obj);
-    }
+	function getDeepValue(obj: any, path: string): any {
+		return path.split('.').reduce((acc, part) => acc && acc[part], obj);
+	}
 
-    // The Interpolator: Replaces {{node_id.field}} with actual data
-    function resolveVariables(text: string): string {
-        if (!text) return text;
-        
-        // Regex to find {{ whatever }}
-        return text.replace(/{{(.*?)}}/g, (match, variablePath) => {
+	// The Interpolator: Replaces {{node_id.field}} with actual data
+	function resolveVariables(text: string): string {
+		if (!text) return text;
+
+		// Regex to find {{ whatever }}
+		return text.replace(/{{(.*?)}}/g, (match, variablePath) => {
 			const cleanPath = variablePath.trim(); // e.g., "node_1.body.login"
 
 			// If it starts with $env, ignore it! (It's a secret)
 			if (cleanPath.startsWith('$env.')) {
-                return match; 
-            }
-            
-            const parts = cleanPath.split('.');
-            const targetNodeId = parts[0]; // "node_1"
-            const valuePath = parts.slice(1).join('.'); // "body.login"
+				return match;
+			}
 
-            // Find the node in our memory
-            const targetNode = nodes.find(n => n.id === targetNodeId);
-            
-            // Safety checks
-            if (!targetNode) {
-                console.warn(`Variable Resolver: Node ${targetNodeId} not found.`);
-                return `{{${cleanPath}}}`; // Leave it alone if not found
-            }
-            if (!targetNode.data.result) {
-                console.warn(`Variable Resolver: Node ${targetNodeId} has no results yet.`);
-                return ""; // Return empty if hasn't run
-            }
+			const parts = cleanPath.split('.');
+			const targetNodeId = parts[0]; // "node_1"
+			const valuePath = parts.slice(1).join('.'); // "body.login"
 
-            // Dig for the value
-            const value = getDeepValue(targetNode.data.result, valuePath);
-            
-            // Return the value (as string) or empty string if undefined
-            return value !== undefined ? String(value) : "";
-        });
-    }
+			// Find the node in our memory
+			const targetNode = nodes.find((n) => n.id === targetNodeId);
+
+			// Safety checks
+			if (!targetNode) {
+				console.warn(`Variable Resolver: Node ${targetNodeId} not found.`);
+				return `{{${cleanPath}}}`; // Leave it alone if not found
+			}
+			if (!targetNode.data.result) {
+				console.warn(`Variable Resolver: Node ${targetNodeId} has no results yet.`);
+				return ''; // Return empty if hasn't run
+			}
+
+			// Dig for the value
+			const value = getDeepValue(targetNode.data.result, valuePath);
+
+			// Return the value (as string) or empty string if undefined
+			return value !== undefined ? String(value) : '';
+		});
+	}
 
 	function runFlow() {
-		// Find all target node IDs (nodes that are destinations)
-		const targetIds = new Set(edges.map(e => e.target));
+		// Collect destination IDs so we can find starting points quickly.
+		const targetIds = new Set(edges.map((e) => e.target));
 
-		// Find nodes that are NOT in that set (Roots)
-		const rootNodes = nodes.filter(n => !targetIds.has(n.id));
+		// Roots are nodes no one points to, so we kick things off there.
+		const rootNodes = nodes.filter((n) => !targetIds.has(n.id));
 
 		if (rootNodes.length === 0 && nodes.length > 0) {
-			alert("Cycle detected or no roots! Running all nodes as fallback.");
-			nodes.forEach(n => executeNode(n.id));
+			alert('Cycle detected or no roots! Running all nodes as fallback.');
+			nodes.forEach((n) => executeNode(n.id));
 			return;
 		}
 
-		// Execute all roots
-		console.log("Starting Flow with Roots:", rootNodes.map(n => n.id));
-		rootNodes.forEach(n => executeNode(n.id));
+		console.log('Starting Flow with Roots:', rootNodes.map((n) => n.id));
+		rootNodes.forEach((n) => executeNode(n.id));
 	}
 
 	function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | 'error', resultBody?: any) {
-    nodes = nodes.map(n => {
-        if (n.id === id) {
-            // If we have a new body, wrap it in { body: ... }
-            // If not (e.g. just setting status to 'running'), keep the old result
-            const newResult = resultBody !== undefined 
-                ? { body: resultBody } 
-                : n.data.result;
+		nodes = nodes.map((n) => {
+			if (n.id === id) {
+				// Accept fresh result data but leave the prior one alone when we can.
+				const newResult =
+					resultBody !== undefined ? { body: resultBody } : n.data.result;
 
 				return {
 					...n,
-					class: status === 'running' ? 'border-blue-500!' :
-						status === 'success' ? 'border-green-500!' :
-						status === 'error'   ? 'border-red-500!' : '',
-					data: { 
-						...n.data, 
-						status: status,
+					class:
+						status === 'running'
+							? 'border-blue-500!'
+							: status === 'success'
+								? 'border-green-500!'
+								: status === 'error'
+									? 'border-red-500!'
+									: '',
+					data: {
+						...n.data,
+						status,
 						result: newResult
 					}
 				};
-        	}
-        	return n;
-    	});
+			}
+			return n;
+		});
 	}
 
-	// Secrets Management
+	// Secrets tab keeps a tiny typed cache so we can render the list fast.
 	type SecretItem = { key: string; createdAt: string };
 	let availableSecrets = $state<SecretItem[]>([]);
 	let secretKeyInput = $state('');
@@ -296,12 +291,12 @@
 
 	async function saveSecret() {
 		if (!secretKeyInput || !secretValueInput) return;
-		
+
 		const res = await fetch('/api/secrets', {
 			method: 'POST',
 			body: JSON.stringify({ key: secretKeyInput, value: secretValueInput })
 		});
-		
+
 		if (res.ok) {
 			// Clear inputs and reload list
 			secretKeyInput = '';
@@ -322,32 +317,32 @@
 	}
 
 	function updateTheme() {
-        const html = document.documentElement;
-        if (isDark) {
-            html.classList.add('dark');
-            localStorage.setItem('theme', 'dark');
-        } else {
-            html.classList.remove('dark');
-            localStorage.setItem('theme', 'light');
-        }
-    }
+		const html = document.documentElement;
+		if (isDark) {
+			html.classList.add('dark');
+			localStorage.setItem('theme', 'dark');
+		} else {
+			html.classList.remove('dark');
+			localStorage.setItem('theme', 'light');
+		}
+	}
 
 	onMount(() => {
 		const stored = localStorage.getItem('theme');
-        if (stored) {
-            isDark = stored === 'dark';
-        } else {
-            // 2. Fallback to System Preference
-            isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        }
-        
-        updateTheme();
+		if (stored) {
+			isDark = stored === 'dark';
+		} else {
+			// Falls back to the OS preference on first visit.
+			isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+		}
+
+		updateTheme();
 		loadLatestFlow();
 		loadSecrets();
 
-		// Listen for Real-time Updates from Rust
+		// Server-sent events stream node results from the Rust worker.
 		const eventSource = new EventSource('/api/stream');
-		
+
 		eventSource.onmessage = (event) => {
 			const result: ExecutionResult = JSON.parse(event.data);
 			const isSuccess = result.status_code >= 200 && result.status_code < 300;
@@ -361,7 +356,7 @@
 				if (outgoingEdges.length > 0) {
 					setTimeout(() => {
 						outgoingEdges.forEach(edge => executeNode(edge.target));
-					}, 500); 
+					}, 500);
 				}
 			}
 		};
@@ -369,12 +364,38 @@
 		return () => eventSource.close();
 	});
 
-	// Helper for random IDs
-    const getId = () => `node_${Math.random().toString(36).substr(2, 9)}`;
+	// Simple ID helper for adhoc nodes on the canvas.
+	const getId = () => `node_${Math.random().toString(36).substr(2, 9)}`;
+
+	function screenPointToFlowPosition(point: { x: number; y: number }): XYPosition {
+		if (!flowWrapper) {
+			return { x: point.x, y: point.y };
+		}
+
+		const bounds = flowWrapper.getBoundingClientRect();
+		return {
+			x: (point.x - bounds.left - viewport.x) / viewport.zoom,
+			y: (point.y - bounds.top - viewport.y) / viewport.zoom
+		};
+	}
+
+	function getCanvasCenterPosition(): XYPosition | null {
+		if (!flowWrapper) return null;
+
+		const bounds = flowWrapper.getBoundingClientRect();
+		const centerScreenPoint = {
+			x: bounds.left + bounds.width / 2,
+			y: bounds.top + bounds.height / 2
+		};
+
+		return screenPointToFlowPosition(centerScreenPoint);
+	}
 
 	function addNode(type: 'http' | 'code' = 'http') {
 		const isHttp = type === 'http';
-		
+		const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
+		const position = getCanvasCenterPosition() ?? fallbackPosition;
+
 		const newNode: AppNode = {
 			id: getId(),
 			type: isHttp ? 'http-request' : 'code-execution', // Switch type
@@ -386,7 +407,7 @@
 				code: isHttp ? undefined : 'return { result: "Hello World" };',
 				status: 'idle'
 			},
-			position: { x: Math.random() * 400, y: Math.random() * 400 }
+			position
 		};
 		nodes = [...nodes, newNode];
 	}
@@ -399,7 +420,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nodes, edges })
             });
-            
+
             if (response.ok) {
                 // Visual feedback (could be a toast later)
                 const btn = document.getElementById('saveBtn');
@@ -435,23 +456,23 @@
 
 	// Sidebar State
     let activeTab = $state<'config' | 'secrets' | 'test'>('config');
-    
+
     function copyToClipboard(text: string) {
         navigator.clipboard.writeText(text);
         // You could add a small toast notification here in the future
 		alert("Copied to clipboard");
     }
 
-    // HEADERS MANAGEMENT
+	// Basic header helpers for the HTTP editor UI.
     function addHeader() {
         if (!selectedNodeId) return;
-        
-        // We treat headers as a generic object in data, 
+
+        // We treat headers as a generic object in data,
         // but for editing we need to ensure it exists.
         nodes = nodes.map(n => {
             if (n.id === selectedNodeId) {
                 const currentHeaders = n.data.headers || {};
-                // Add a blank entry placeholder if needed, 
+                // Add a blank entry placeholder if needed,
                 // but easier: just let user type in a new row UI.
                 // Actually, let's initialize it if missing.
                 return { ...n, data: { ...n.data, headers: { ...currentHeaders, "": "" } } };
@@ -488,12 +509,12 @@
 </script>
 
 <div class="h-screen w-full flex flex-col text-foreground font-sans bg-background">
-	<!-- Navbar -->
+	<!-- Top nav -->
 	<div class="px-6 py-3 border-b border-border flex justify-between items-center bg-card z-10 shadow-xs">
 		<div class="flex items-center gap-4">
             <h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
-            <!-- THEME TOGGLE -->
-            <button 
+            <!-- Quick theme toggle -->
+            <button
                 onclick={toggleTheme}
                 class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground text-muted-foreground transition-colors"
             >
@@ -501,19 +522,19 @@
             </button>
         </div>
 		<div class="flex gap-2">
-			<button 
+			<button
 				onclick={() => addNode('http')}
 				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 			>
 				+ Add HTTP Node
 			</button>
-			<button 
+			<button
 				onclick={() => addNode('code')}
 				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 			>
 				+ Add Code Node
 			</button>
-			<button 
+			<button
 				id="saveBtn"
 				onclick={saveFlow}
 				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
@@ -526,8 +547,8 @@
             >
                 Run Flow
             </button>
-			<!-- Toggle Theme Button -->
-			<button 
+			<!-- Icon toggle for fun -->
+			<button
 				onclick={toggleTheme}
 				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors border border-border bg-background text-foreground"
 				title="Toggle Theme"
@@ -543,35 +564,35 @@
 		</div>
 	</div>
 
-	<!-- Main Layout -->
+	<!-- Main layout -->
 	<div class="grow flex overflow-hidden relative">
-		
-		<!-- Canvas Area -->
-		<div class="grow h-full bg-background relative">
+
+		<!-- Canvas -->
+		<div class="grow h-full bg-background relative" bind:this={flowWrapper}>
             <SvelteFlow
                 bind:nodes={nodes}
                 bind:edges={edges}
+                bind:viewport={viewport}
                 nodeTypes={nodeTypes}
                 colorMode={isDark ? 'dark' : 'light'}
                 onnodeclick={onNodeClick}
                 onpaneclick={onPaneClick}
                 fitView
-                class="bg-muted/20" 
+                class="bg-muted/20"
             >
 				<Background patternColor={isDark ? '#334155' : '#cbd5e1'} gap={20} />
 				<Controls />
 			</SvelteFlow>
 		</div>
 
-		<!-- Configuration Sidebar -->
+		<!-- Node sidebar -->
 		{#if selectedNode}
 			<div class="w-96 border-l border-sidebar-border bg-sidebar text-sidebar-foreground flex flex-col shadow-xl z-20 h-full transition-all">
-				
-				<!-- 1. UTILITY HEADER (ID & Close) -->
+
+				<!-- Node header -->
 				<div class="px-4 py-2 border-b border-sidebar-border bg-sidebar-accent/50 flex justify-between items-center">
                     <div class="flex items-center gap-2">
                         <span class="text-[10px] font-bold uppercase text-muted-foreground tracking-wider">Node ID</span>
-                        <!-- Code block: bg-white -> bg-background -->
                         <code class="text-xs font-mono bg-background px-1.5 py-0.5 rounded border border-border text-muted-foreground select-all">
                             {selectedNode.id}
                         </code>
@@ -581,42 +602,39 @@
                     </button>
                 </div>
 
-				<!-- TABS CONTAINER -->
+				<!-- Sidebar tabs -->
 				<div class="flex border-b border-sidebar-border p-2 gap-1 bg-sidebar">
-					
-					<!-- Config Tab -->
-					<button 
+
+					<button
 						onclick={() => activeTab = 'config'}
 						class={`
 							px-3 py-2 text-xs font-bold uppercase tracking-wide rounded-md transition-all border
-							${activeTab === 'config' 
-								? 'bg-background border-sidebar-border text-foreground shadow-sm' 
+							${activeTab === 'config'
+								? 'bg-background border-sidebar-border text-foreground shadow-sm'
 								: 'border-transparent text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'}
 						`}
 					>
 						Configure
 					</button>
 
-					<!-- Secrets Tab -->
-					<button 
+					<button
 						onclick={() => activeTab = 'secrets'}
 						class={`
 							px-3 py-2 text-xs font-bold uppercase tracking-wide rounded-md transition-all border
-							${activeTab === 'secrets' 
-								? 'bg-background border-sidebar-border text-blue-600 shadow-sm' 
+							${activeTab === 'secrets'
+								? 'bg-background border-sidebar-border text-blue-600 shadow-sm'
 								: 'border-transparent text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'}
 						`}
 					>
 						Secrets
 					</button>
-					
-					<!-- Test/Debug Tab -->
-					<button 
+
+					<button
 						onclick={() => activeTab = 'test'}
 						class={`
 							px-3 py-2 text-xs font-bold uppercase tracking-wide rounded-md transition-all border
-							${activeTab === 'test' 
-								? 'bg-background border-sidebar-border text-purple-600 shadow-sm' 
+							${activeTab === 'test'
+								? 'bg-background border-sidebar-border text-purple-600 shadow-sm'
 								: 'border-transparent text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'}
 						`}
 					>
@@ -624,14 +642,14 @@
 					</button>
 				</div>
 
-				<!-- 3. CONTENT AREA -->
+				<!-- Sidebar content -->
 				<div class="p-5 flex flex-col gap-6 overflow-y-auto grow bg-sidebar relative">
-					
-					<!-- VIEW: CONFIGURATION -->
+
+					<!-- Config view -->
 					{#if activeTab === 'config'}
 
 						{#if selectedNode.type === 'http-request'}
-							<!-- HTTP NODE CONFIGURATION -->
+							<!-- HTTP form -->
 							<div class="flex flex-col gap-2">
 								<label for="url" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
 									Target URL
@@ -646,7 +664,6 @@
 								/>
 							</div>
 
-							<!-- Method Input -->
 							<div class="flex flex-col gap-2">
 								<label for="method" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
 									HTTP Method
@@ -665,13 +682,13 @@
 								</select>
 							</div>
 
-							<!-- Headers Input -->
+							<!-- Headers list -->
 							<div class="flex flex-col gap-2">
 								<div class="flex justify-between items-center">
 									<span class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
 										Headers
 									</span>
-									<button 
+									<button
 										onclick={() => {
 											// Logic to add a temporary unique key
 											const key = `New-Header-${Math.floor(Math.random() * 100)}`;
@@ -682,30 +699,27 @@
 										+ Add
 									</button>
 								</div>
-								
+
 								{#if selectedNode.data.headers && Object.keys(selectedNode.data.headers).length > 0}
 									<div class="flex flex-col gap-2 border border-sidebar-border rounded p-2 bg-sidebar-accent">
 										{#each Object.entries(selectedNode.data.headers) as [key, value]}
 											<div class="flex gap-1 items-center">
-												<!-- Key Input -->
-												<input 
-													type="text" 
+												<input
+													type="text"
 													value={key}
 													onchange={(e) => updateHeaderKey(key, e.currentTarget.value)}
 													class="w-1/3 text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
 													placeholder="Key"
 												/>
 												<span class="text-slate-400">:</span>
-												<!-- Value Input -->
-												<input 
-													type="text" 
+												<input
+													type="text"
 													value={value}
 													oninput={(e) => updateHeaderValue(key, e.currentTarget.value)}
 													class="grow text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
 													placeholder="Value"
 												/>
-												<!-- Remove Button -->
-												<button 
+												<button
 													onclick={() => removeHeader(key)}
 													class="text-slate-400 hover:text-red-500 px-1"
 													title="Remove Header"
@@ -722,7 +736,7 @@
 								{/if}
 							</div>
 
-							<!-- JSON Body -->
+							<!-- JSON body -->
 							<div class="flex flex-col gap-2 h-full">
 								<div class="flex justify-between items-center">
 									<label for="body" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
@@ -732,8 +746,8 @@
 								</div>
 								<textarea
 									id="body"
-									value={typeof selectedNode.data.body === 'string' 
-										? selectedNode.data.body 
+									value={typeof selectedNode.data.body === 'string'
+										? selectedNode.data.body
 										: (selectedNode.data.body ? JSON.stringify(selectedNode.data.body, null, 2) : '')}
 									oninput={(e) => updateNodeData('body', e.currentTarget.value)}
 									class="border border-slate-300 p-2 rounded-md text-xs font-mono grow min-h-[150px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
@@ -743,7 +757,7 @@
 						{/if}
 
 						{#if selectedNode.type === 'code-execution'}
-							<!-- Javascript Code Editor -->
+							<!-- Code node editor -->
 							<div class="flex flex-col gap-2 h-64">
 								<label for="code" class="text-xs font-bold uppercase text-slate-500 tracking-wider">JavaScript Code</label>
 								<textarea
@@ -758,8 +772,8 @@
 									Available: <code class="bg-slate-100 px-1">INPUT</code> variable contains mapped data.
 								</div>
 							</div>
-					
-							<!-- Inputs Mapping -->
+
+							<!-- Inputs mapping -->
 							<div class="flex flex-col gap-2">
 								<label for="inputs" class="text-xs font-bold uppercase text-slate-500 tracking-wider">Input Mapping (JSON)</label>
 								<textarea
@@ -774,35 +788,35 @@
 
 					{/if}
 
-					<!-- VIEW: SECRETS -->
+					<!-- Secrets view -->
 					{#if activeTab === 'secrets'}
 					<div class="flex flex-col gap-4">
 						<div class="bg-blue-50 text-blue-800 p-3 rounded-md text-xs border border-blue-100">
 							<strong>Secrets Vault</strong><br/>
 							Store API keys securely here. They are encrypted in the database and never shown in the browser.
 						</div>
-						
-						<!-- Add Secret Form -->
+
+						<!-- Secret form -->
 						<div class="flex flex-col gap-2 border-b pb-4 border-sidebar-border">
 							<label for="secret-key" class="text-xs font-bold uppercase text-muted-foreground">Key Name</label>
-							<input 
-								id="secret-key" 
-								type="text" 
+							<input
+								id="secret-key"
+								type="text"
 								bind:value={secretKeyInput}
-								placeholder="OPENAI_API_KEY" 
-								class="border p-2 rounded text-xs font-mono uppercase" 
+								placeholder="OPENAI_API_KEY"
+								class="border p-2 rounded text-xs font-mono uppercase"
 							/>
-							
+
 							<label for="secret-value" class="text-xs font-bold uppercase text-muted-foreground mt-2">Value</label>
-							<input 
-								id="secret-value" 
-								type="password" 
+							<input
+								id="secret-value"
+								type="password"
 								bind:value={secretValueInput}
-								placeholder="sk-..." 
-								class="border p-2 rounded text-xs" 
+								placeholder="sk-..."
+								class="border p-2 rounded text-xs"
 							/>
-							
-							<button 
+
+							<button
 								onclick={saveSecret}
 								class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 							>
@@ -810,14 +824,14 @@
 							</button>
 						</div>
 
-						<!-- Available Secrets List -->
+						<!-- Saved secrets -->
 						<div class="flex flex-col gap-2">
 							<span class="text-xs font-bold uppercase text-muted-foreground">Available Secrets</span>
-							
+
 							{#each availableSecrets as secret}
 								<div class="flex items-center justify-between p-2 bg-sidebar-accent rounded border border-sidebar-border">
 									<code class="text-xs font-mono text-foreground">$env.{secret.key}</code>
-									<button 
+									<button
 										onclick={() => copyToClipboard(`{{$env.${secret.key}}}`)}
 										class="text-[10px] bg-accent border border-border px-2 py-1 rounded hover:bg-accent-foreground text-accent-foreground"
 									>
@@ -831,7 +845,7 @@
 					</div>
 					{/if}
 
-					<!-- VIEW: RESULTS -->
+					<!-- Results view -->
 					{#if activeTab === 'test'}
 						<div class="flex flex-col gap-3">
 							<div class="flex justify-between items-center">
@@ -862,7 +876,7 @@
 					{/if}
 				</div>
 
-				<!-- FIXED FOOTER -->
+				<!-- Sticky footer -->
 				<div class="p-4 border-t border-sidebar-border bg-sidebar-accent text-center">
 					<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
 						{#if selectedNode.data.status === 'running'}

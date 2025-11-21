@@ -8,8 +8,8 @@
   
     <!-- The Container -->
     <div class={`
-        min-w-[200px] bg-card text-card-foreground rounded-lg shadow-xs border-2 transition-all
-        ${selected ? 'border-ring ring-1 ring-ring' : 'border-border'}
+    min-w-[200px] bg-card text-card-foreground rounded-lg shadow-xs border-2 transition-all
+        ${selected ? 'border-slate-300 dark:border-slate-500 bg-slate-50/40 dark:bg-slate-900/40 shadow-[0_0_0_1px_rgba(148,163,184,0.4)] dark:shadow-[0_0_0_1px_rgba(100,116,139,0.5)]' : 'border-border'}
         ${data.status === 'running' ? 'border-blue-500! shadow-blue-500/20!' : ''}
         ${data.status === 'success' ? 'border-green-500! shadow-green-500/20!' : ''}
         ${data.status === 'error' ? 'border-destructive! shadow-destructive/20!' : ''}

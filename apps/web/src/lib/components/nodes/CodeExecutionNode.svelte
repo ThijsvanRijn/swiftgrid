@@ -8,7 +8,7 @@
   
 <div class={`
     min-w-[200px] bg-card text-card-foreground rounded-lg shadow-md border-2 transition-all
-    ${selected ? 'border-purple-500 ring-1 ring-purple-500' : 'border-border'}
+    ${selected ? 'border-slate-300 dark:border-slate-500 bg-slate-50/40 dark:bg-slate-900/40 shadow-[0_0_0_1px_rgba(148,163,184,0.4)] dark:shadow-[0_0_0_1px_rgba(100,116,139,0.5)]' : 'border-border'}
     ${data.status === 'running' ? 'border-purple-500! shadow-purple-500/20!' : ''}
     ${data.status === 'success' ? 'border-green-500! shadow-green-500/20!' : ''}
     ${data.status === 'error' ? 'border-destructive! shadow-destructive/20!' : ''}

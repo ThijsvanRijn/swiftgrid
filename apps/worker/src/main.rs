@@ -1,34 +1,35 @@
 use redis::{AsyncCommands, RedisResult, streams::{StreamReadOptions, StreamReadReply}};
-use std::error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
-use typeshare::typeshare;
-use rquickjs::{AsyncContext, AsyncRuntime, Value};
 use tokio::sync::mpsc; // Channels
 use tokio::sync::oneshot; // One-way response channel
+use typeshare::typeshare;
+use rquickjs::{AsyncContext, AsyncRuntime, Value};
 
-// --- SHARED TYPES (Source of Truth) ---
-#[typeshare] 
-#[derive(Serialize, Deserialize, Debug, Clone)] 
-#[serde(rename_all = "UPPERCASE")] 
+// Shared enums map 1:1 with the Svelte side.
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
     GET, POST, PUT, DELETE, PATCH
 }
 
-// The Instruction (Svelte -> Rust)
+// Payload shape for HTTP nodes.
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HttpNodeData {
     pub url: String,
-    pub method: HttpMethod, 
-    #[serde(default)] 
+    pub method: HttpMethod,
+    #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
     #[typeshare(serialized_as = "any")]
     #[serde(default)]
     pub body: Option<serde_json::Value>,
 }
 
+// Payload shape for inline JS nodes.
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CodeNodeData {
@@ -38,15 +39,17 @@ pub struct CodeNodeData {
     pub inputs: Option<serde_json::Value>, // Data from previous nodes
 }
 
+// Worker receives either HTTP or CODE.
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type", content = "data")] // Crucial for TypeScript Discriminated Union
-#[serde(rename_all = "UPPERCASE")]       // "HTTP" or "CODE"
+#[serde(tag = "type", content = "data")] // TypeScript discriminated union
+#[serde(rename_all = "UPPERCASE")]
 pub enum NodeType {
     Http(HttpNodeData),
     Code(CodeNodeData),
 }
 
+// Stream job pulled from Redis.
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug)]
 struct WorkerJob {
@@ -54,7 +57,7 @@ struct WorkerJob {
     pub node: NodeType,
 }
 
-// The Receipt (Rust -> Svelte)
+// Execution receipt pushed back to the UI.
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug)]
 struct ExecutionResult {
@@ -66,7 +69,7 @@ struct ExecutionResult {
     timestamp: u64,
 }
 
-// This is what we send to the dedicated JS thread (worker)
+// Message sent into the JS runtime thread.
 struct JsTask {
     code: String,
     inputs: Option<serde_json::Value>,
@@ -87,8 +90,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .user_agent(APP_USER_AGENT)
         .build()?;
 
-    // 1. SPAWN DEDICATED JS THREAD
-    // We create a channel to talk to it.
+    // Spin up the dedicated JS thread and keep a channel to it.
     let (js_sender, mut js_receiver) = mpsc::channel::<JsTask>(100);
     
     std::thread::spawn(move || {
@@ -112,7 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     });
 
-    // 2. REDIS SETUP
+    // Redis streams for jobs + receipts.
     let stream_key = "swiftgrid_stream";
     let result_stream_key = "swiftgrid_results";
     let group_name = "workers_group";
@@ -122,6 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Listening for jobs...");
 
     loop {
+        // Blocking read so we only wake when a job arrives.
         let opts = StreamReadOptions::default().group(group_name, consumer_name).count(1).block(0);
         let result: StreamReadReply = con.xread_options(&[stream_key], &[">"], &opts).await?;
 
@@ -144,13 +147,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             let j_sender = js_sender.clone();
 
                             tokio::spawn(async move {
-                                // EXECUTE BASED ON TYPE
+                                // Execute node based on type.
                                 let (status, body) = match job.node {
                                     NodeType::Http(data) => {
                                         execute_http(h_client, data).await
                                     }
                                     NodeType::Code(data) => {
-                                        // Send to JS Thread and wait for answer
+                                        // Send to JS thread and wait for answer.
                                         let (tx, rx) = oneshot::channel();
                                         
                                         let task = JsTask {
@@ -173,16 +176,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                 // SEND RECEIPT
                                 let receipt = ExecutionResult {
-                                    node_id: job_id,
+                                    node_id: job_id.clone(),
                                     status_code: status,
                                     body,
                                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
                                 };
 
-                                let receipt_json = serde_json::to_string(&receipt).unwrap();
-                                let _: RedisResult<String> = r_con.xadd(result_stream_key, "*", &[("payload", receipt_json)]).await;
-                                let _: () = r_con.xack(stream_key, group_name, &[&msg_id]).await.unwrap();
-                                let _: () = r_con.xdel(stream_key, &[&msg_id]).await.unwrap();
+                                match serde_json::to_string(&receipt) {
+                                    Ok(receipt_json) => {
+                                        let res: RedisResult<String> = r_con.xadd(result_stream_key, "*", &[("payload", receipt_json)]).await;
+                                        if let Err(e) = res {
+                                            eprintln!("failed to publish execution result for {}: {}", job_id, e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("critical: failed to serialize execution result for {}: {}", job_id, e);
+                                    }
+                                }
+
+                                let ack_res: RedisResult<()> = r_con.xack(stream_key, group_name, &[&msg_id]).await;
+                                if let Err(e) = ack_res {
+                                    eprintln!("failed to acknowledge redis message {}: {}", msg_id, e);
+                                }
+
+                                let del_res: RedisResult<()> = r_con.xdel(stream_key, &[&msg_id]).await;
+                                if let Err(e) = del_res {
+                                    eprintln!("failed to delete redis message {}: {}", msg_id, e);
+                                }
                             });
                         }
                         Err(e) => eprintln!("Failed to parse WorkerJob: {}", e),
@@ -193,8 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-// --- LOGIC IMPLEMENTATIONS ---
-
+// Basic HTTP executor so the worker can stay lean.
 async fn execute_http(client: reqwest::Client, data: HttpNodeData) -> (u16, Option<serde_json::Value>) {
     let reqwest_method: reqwest::Method = format!("{:?}", data.method).parse().unwrap();
     let mut req = client.request(reqwest_method, &data.url);
@@ -215,17 +234,19 @@ async fn execute_http(client: reqwest::Client, data: HttpNodeData) -> (u16, Opti
     }
 }
 
-// --- HELPER: JAVASCRIPT LOGIC ---
+// Runs user code inside rquickjs and converts whatever comes back into JSON.
 async fn run_js_safely(ctx: &AsyncContext, code: String, inputs: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
-
     ctx.async_with(|ctx| Box::pin(async move { 
+
+        // This produces a valid JS Object literal, e.g., {"key":"value"}
         let input_json = serde_json::to_string(&inputs.unwrap_or(serde_json::json!({}))).unwrap_or("{}".into());
         
+        // We simply pass the object literal directly into the function arguments.
         let script = format!(
             r#"
             (function(INPUT) {{
                 {}
-            }})(JSON.parse('{}'))
+            }})({}) 
             "#,
             code,
             input_json
