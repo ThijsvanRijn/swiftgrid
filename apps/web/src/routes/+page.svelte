@@ -3,35 +3,35 @@
 		SvelteFlow,
 		Background,
 		Controls,
-		type Node,
 		type Edge
+		// type Node is no longer needed here if we use AppNode
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
+
+	// 1. Import the shared types you created
+	import type { AppNode, AppNodeData } from '$lib/types/app';
+	
+	// 2. Import Worker types
 	import { type HttpRequestNode, HttpMethod } from '$lib/types/worker';
 
-	// Define custom data shape
-	type AppNodeData = {
-		label?: string;
-		url?: string;
-		method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
-		// New fields for feedback
-		status?: 'idle' | 'running' | 'success' | 'error';
-		result?: any;
-		body?: any;
-		[key: string]: unknown; 
+	// 3. Import your Custom Component
+	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
+
+	// 4. Register the Custom Node Type
+	const nodeTypes = {
+		'http-request': HttpRequestNodeComponent
 	};
 
-	// Define specific Node type
-	type AppNode = Node<AppNodeData>;
-
+	// State uses the imported AppNode type
 	let nodes = $state.raw<AppNode[]>([
 		{
 			id: '1',
-			type: 'default',
+			type: 'http-request', // Update this to use your new component!
 			data: {
 				label: 'HTTP Request',
 				url: 'https://api.github.com/zen',
-				method: 'GET'
+				method: 'GET',
+				status: 'idle'
 			},
 			position: { x: 250, y: 50 }
 		}
@@ -71,6 +71,7 @@
 	 */
 	const onNodeClick = ({ node }: { node: AppNode }) => {
 		selectedNodeId = node.id;
+		activeTab = 'config'; 
 	};
 
 	const onPaneClick = () => {
@@ -98,6 +99,16 @@
 
 		// B. Resolve Body variables
 		let finalBody = undefined;
+
+		let finalHeaders: Record<string, string> | undefined = undefined;
+
+		if (node.data.headers) {
+            finalHeaders = {};
+            for (const [key, val] of Object.entries(node.data.headers)) {
+                // Resolve {{node_1...}} in the header value
+                finalHeaders[key] = resolveVariables(String(val));
+            }
+        }
 		
 		if (node.data.body) {
 			// We treat the body as a string first so we can do the regex replacement
@@ -123,7 +134,7 @@
 			id: node.id,
 			url: finalUrl, 
 			method: node.data.method as HttpMethod,
-			headers: undefined,
+			headers: finalHeaders,
 			body: finalBody
 		};
 
@@ -152,8 +163,13 @@
         if (!text) return text;
         
         // Regex to find {{ whatever }}
-        return text.replace(/{{(.*?)}}/g, (_, variablePath) => {
-            const cleanPath = variablePath.trim(); // e.g., "node_1.body.login"
+        return text.replace(/{{(.*?)}}/g, (match, variablePath) => {
+			const cleanPath = variablePath.trim(); // e.g., "node_1.body.login"
+
+			// If it starts with $env, ignore it! (It's a secret)
+			if (cleanPath.startsWith('$env.')) {
+                return match; 
+            }
             
             const parts = cleanPath.split('.');
             const targetNodeId = parts[0]; // "node_1"
@@ -209,9 +225,9 @@
 
 				return {
 					...n,
-					class: status === 'running' ? '!border-blue-500 !border-2 !bg-blue-50' :
-						status === 'success' ? '!border-green-500 !border-2 !bg-green-50' :
-						status === 'error'   ? '!border-red-500 !border-2 !bg-red-50' : '',
+					class: status === 'running' ? 'border-blue-500!' :
+						status === 'success' ? 'border-green-500!' :
+						status === 'error'   ? 'border-red-500!' : '',
 					data: { 
 						...n.data, 
 						status: status,
@@ -223,211 +239,551 @@
     	});
 	}
 
+	// Secrets Management
+	type SecretItem = { key: string; createdAt: string };
+	let availableSecrets = $state<SecretItem[]>([]);
+	let secretKeyInput = $state('');
+	let secretValueInput = $state('');
+
+	async function loadSecrets() {
+		const res = await fetch('/api/secrets');
+		if (res.ok) availableSecrets = await res.json();
+	}
+
+	async function saveSecret() {
+		if (!secretKeyInput || !secretValueInput) return;
+		
+		const res = await fetch('/api/secrets', {
+			method: 'POST',
+			body: JSON.stringify({ key: secretKeyInput, value: secretValueInput })
+		});
+		
+		if (res.ok) {
+			// Clear inputs and reload list
+			secretKeyInput = '';
+			secretValueInput = '';
+			loadSecrets();
+			alert("Secret saved!");
+		}
+	}
+
 	import { onMount } from 'svelte';
 	import type { ExecutionResult } from '$lib/types/worker';
 
+	let isDark = $state(false);
+
+	function toggleTheme() {
+		isDark = !isDark;
+		updateTheme();
+	}
+
+	function updateTheme() {
+        const html = document.documentElement;
+        if (isDark) {
+            html.classList.add('dark');
+            localStorage.setItem('theme', 'dark');
+        } else {
+            html.classList.remove('dark');
+            localStorage.setItem('theme', 'light');
+        }
+    }
+
 	onMount(() => {
+		const stored = localStorage.getItem('theme');
+        if (stored) {
+            isDark = stored === 'dark';
+        } else {
+            // 2. Fallback to System Preference
+            isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        }
+        
+        updateTheme();
+		loadLatestFlow();
+		loadSecrets();
+
+		// Listen for Real-time Updates from Rust
 		const eventSource = new EventSource('/api/stream');
 		
 		eventSource.onmessage = (event) => {
 			const result: ExecutionResult = JSON.parse(event.data);
 			const isSuccess = result.status_code >= 200 && result.status_code < 300;
 
-			// 1. Update the finished node visual state
+			// Update the node visual state
 			updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
 
-			// 2. DAISY CHAIN LOGIC
+			// DAISY CHAIN LOGIC (Trigger next node)
 			if (isSuccess) {
-				// Find all edges where the source is the node that just finished
 				const outgoingEdges = edges.filter(e => e.source === result.node_id);
-				
 				if (outgoingEdges.length > 0) {
-					console.log(`Node ${result.node_id} finished. Triggering ${outgoingEdges.length} children.`);
-					
-					// We add a tiny delay (500ms) so you can visually see the flow moving
 					setTimeout(() => {
-						outgoingEdges.forEach(edge => {
-							executeNode(edge.target);
-						});
+						outgoingEdges.forEach(edge => executeNode(edge.target));
 					}, 500); 
 				}
 			}
 		};
 
-		// Cleanup when page closes
-		return () => {
-			eventSource.close();
-		};
+		return () => eventSource.close();
 	});
 
 	// Helper for random IDs
     const getId = () => `node_${Math.random().toString(36).substr(2, 9)}`;
 
-    function addNode() {
+	function addNode() {
         const newNode: AppNode = {
             id: getId(),
-            type: 'default',
+            type: 'http-request', 
             data: {
                 label: 'New Request',
                 url: '',
                 method: 'GET',
                 status: 'idle'
             },
-            // Place it slightly offset from the center or last node
             position: { x: Math.random() * 400, y: Math.random() * 400 }
         };
-        
-        // Svelte 5 Immutable update
         nodes = [...nodes, newNode];
+    }
+
+    async function saveFlow() {
+        // We send the raw arrays. Svelte 5 proxies (from $state) serialize fine via JSON.stringify
+        try {
+            const response = await fetch('/api/flows', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nodes, edges })
+            });
+            
+            if (response.ok) {
+                // Visual feedback (could be a toast later)
+                const btn = document.getElementById('saveBtn');
+                if (btn) {
+                    const originalText = btn.innerText;
+                    btn.innerText = "Saved!";
+                    setTimeout(() => btn.innerText = originalText, 2000);
+                }
+            }
+        } catch (e) {
+            console.error("Save failed", e);
+            alert("Failed to save flow to DB");
+        }
+    }
+
+    async function loadLatestFlow() {
+        try {
+            const response = await fetch('/api/flows');
+            const data = await response.json();
+
+            if (data.graph) {
+                // Restore state from DB
+                // We cast to any because the DB JSONB type is generic
+                const graph = data.graph as any;
+                nodes = graph.nodes || [];
+                edges = graph.edges || [];
+                console.log("Flow loaded from DB!");
+            }
+        } catch (e) {
+            console.error("Load failed", e);
+        }
+    }
+
+	// Sidebar State
+    let activeTab = $state<'config' | 'secrets' | 'test'>('config');
+    
+    function copyToClipboard(text: string) {
+        navigator.clipboard.writeText(text);
+        // You could add a small toast notification here in the future
+		alert("Copied to clipboard");
+    }
+
+    // HEADERS MANAGEMENT
+    function addHeader() {
+        if (!selectedNodeId) return;
+        
+        // We treat headers as a generic object in data, 
+        // but for editing we need to ensure it exists.
+        nodes = nodes.map(n => {
+            if (n.id === selectedNodeId) {
+                const currentHeaders = n.data.headers || {};
+                // Add a blank entry placeholder if needed, 
+                // but easier: just let user type in a new row UI.
+                // Actually, let's initialize it if missing.
+                return { ...n, data: { ...n.data, headers: { ...currentHeaders, "": "" } } };
+            }
+            return n;
+        });
+    }
+
+    // Helper to update a specific header key/value
+    // Since standard JSON objects don't preserve order or allow editing keys easily,
+    // we often convert to array for UI, but let's do a direct edit for simplicity.
+    function updateHeaderKey(oldKey: string, newKey: string) {
+        if (!selectedNode) return;
+        const headers = { ...selectedNode.data.headers };
+        const value = headers[oldKey];
+        delete headers[oldKey];
+        headers[newKey] = value; // Re-assign with new key
+        updateNodeData('headers', headers);
+    }
+
+    function updateHeaderValue(key: string, newValue: string) {
+        if (!selectedNode) return;
+        const headers = { ...selectedNode.data.headers };
+        headers[key] = newValue;
+        updateNodeData('headers', headers);
+    }
+
+    function removeHeader(key: string) {
+        if (!selectedNode) return;
+        const headers = { ...selectedNode.data.headers };
+        delete headers[key];
+        updateNodeData('headers', headers);
     }
 </script>
 
-<div class="h-screen w-full flex flex-col text-slate-900 font-sans">
+<div class="h-screen w-full flex flex-col text-foreground font-sans bg-background">
 	<!-- Navbar -->
-	<div class="px-6 py-3 border-b border-slate-200 flex justify-between items-center bg-white z-10 shadow-sm">
-		<h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
-		<button 
-			onclick={addNode}
-			class="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded hover:bg-gray-50 font-medium text-sm transition-colors"
-		>
-			+ Add Node
-		</button>
-		<button
-			onclick={runFlow}
-			class="bg-slate-900 text-white px-4 py-2 rounded-md hover:bg-slate-700 font-medium text-sm transition-colors shadow-sm"
-		>
-			Run Flow
-		</button>
+	<div class="px-6 py-3 border-b border-border flex justify-between items-center bg-card z-10 shadow-xs">
+		<div class="flex items-center gap-4">
+            <h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
+            <!-- THEME TOGGLE -->
+            <button 
+                onclick={toggleTheme}
+                class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground text-muted-foreground transition-colors"
+            >
+                {#if isDark} 🌙 {:else} ☀️ {/if}
+            </button>
+        </div>
+		<div class="flex gap-2">
+			<button 
+				onclick={addNode}
+				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
+			>
+				+ Add Node
+			</button>
+			<button 
+				id="saveBtn"
+				onclick={saveFlow}
+				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
+			>
+				Save
+			</button>
+            <button
+            	onclick={runFlow}
+                class="bg-primary text-primary-foreground px-4 py-2 rounded-md hover:opacity-90 font-medium text-sm transition-colors"
+            >
+                Run Flow
+            </button>
+			<!-- Toggle Theme Button -->
+			<button 
+				onclick={toggleTheme}
+				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors border border-border bg-background text-foreground"
+				title="Toggle Theme"
+			>
+				{#if isDark}
+					<!-- Moon Icon -->
+					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+				{:else}
+					<!-- Sun Icon -->
+					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+				{/if}
+			</button>
+		</div>
 	</div>
 
 	<!-- Main Layout -->
 	<div class="grow flex overflow-hidden relative">
 		
 		<!-- Canvas Area -->
-		<div class="grow h-full bg-slate-50 relative">
-			<SvelteFlow
-				bind:nodes
-				bind:edges
-				onnodeclick={onNodeClick}
-				onpaneclick={onPaneClick}
-				fitView
-				class="bg-slate-50"
-			>
-				<Background patternColor="#cbd5e1" gap={20} />
+		<div class="grow h-full bg-background relative">
+            <SvelteFlow
+                bind:nodes={nodes}
+                bind:edges={edges}
+                nodeTypes={nodeTypes}
+                colorMode={isDark ? 'dark' : 'light'}
+                onnodeclick={onNodeClick}
+                onpaneclick={onPaneClick}
+                fitView
+                class="bg-muted/20" 
+            >
+				<Background patternColor={isDark ? '#334155' : '#cbd5e1'} gap={20} />
 				<Controls />
 			</SvelteFlow>
 		</div>
 
 		<!-- Configuration Sidebar -->
-		<!-- We conditionally render this sidebar based on the derived selectedNode -->
 		{#if selectedNode}
-			<div class="w-80 border-l border-slate-200 bg-white flex flex-col shadow-xl z-20 h-full transition-all">
+			<div class="w-96 border-l border-sidebar-border bg-sidebar text-sidebar-foreground flex flex-col shadow-xl z-20 h-full transition-all">
 				
-				<!-- Sidebar Header -->
-				<div class="p-5 border-b border-slate-100 bg-white">
-					<h2 class="font-bold text-lg text-slate-800">Configuration</h2>
-					<div class="text-xs text-slate-400 font-mono mt-1">ID: {selectedNode.id}</div>
-				</div>
+				<!-- 1. UTILITY HEADER (ID & Close) -->
+				<div class="px-4 py-2 border-b border-sidebar-border bg-sidebar-accent/50 flex justify-between items-center">
+                    <div class="flex items-center gap-2">
+                        <span class="text-[10px] font-bold uppercase text-muted-foreground tracking-wider">Node ID</span>
+                        <!-- Code block: bg-white -> bg-background -->
+                        <code class="text-xs font-mono bg-background px-1.5 py-0.5 rounded border border-border text-muted-foreground select-all">
+                            {selectedNode.id}
+                        </code>
+                    </div>
+                    <button onclick={() => selectedNodeId = null} class="text-muted-foreground hover:text-foreground">
+                        ×
+                    </button>
+                </div>
 
-				<!-- Sidebar Form -->
-				<div class="p-5 flex flex-col gap-6 overflow-y-auto grow">
+				<!-- TABS CONTAINER -->
+				<div class="flex border-b border-sidebar-border p-2 gap-1 bg-sidebar">
 					
-					<!-- URL Input -->
-					<div class="flex flex-col gap-2">
-						<label for="url" class="text-xs font-bold uppercase text-slate-500 tracking-wider">
-							Target URL
-						</label>
-						<input
-							id="url"
-							type="text"
-							value={selectedNode.data.url}
-							oninput={(e) => updateNodeData('url', e.currentTarget.value)}
-							class="border border-slate-300 p-2.5 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow"
-							placeholder="https://api.example.com"
-						/>
-					</div>
+					<!-- Config Tab -->
+					<button 
+						onclick={() => activeTab = 'config'}
+						class={`
+							px-3 py-2 text-xs font-bold uppercase tracking-wide rounded-md transition-all border
+							${activeTab === 'config' 
+								? 'bg-background border-sidebar-border text-foreground shadow-sm' 
+								: 'border-transparent text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'}
+						`}
+					>
+						Configure
+					</button>
 
-					<!-- Method Input (Native Style) -->
-					<div class="flex flex-col gap-2">
-						<label for="method" class="text-xs font-bold uppercase text-slate-500 tracking-wider">
-							HTTP Method
-						</label>
-						<select
-							id="method"
-							value={selectedNode.data.method}
-							onchange={(e) => updateNodeData('method', e.currentTarget.value)}
-							class="w-full border border-slate-300 p-2 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-black transition-all"
-						>
-							<option value="GET">GET</option>
-							<option value="POST">POST</option>
-							<option value="PUT">PUT</option>
-							<option value="DELETE">DELETE</option>
-							<option value="PATCH">PATCH</option>
-						</select>
-					</div>
+					<!-- Secrets Tab -->
+					<button 
+						onclick={() => activeTab = 'secrets'}
+						class={`
+							px-3 py-2 text-xs font-bold uppercase tracking-wide rounded-md transition-all border
+							${activeTab === 'secrets' 
+								? 'bg-background border-sidebar-border text-blue-600 shadow-sm' 
+								: 'border-transparent text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'}
+						`}
+					>
+						Secrets
+					</button>
+					
+					<!-- Test/Debug Tab -->
+					<button 
+						onclick={() => activeTab = 'test'}
+						class={`
+							px-3 py-2 text-xs font-bold uppercase tracking-wide rounded-md transition-all border
+							${activeTab === 'test' 
+								? 'bg-background border-sidebar-border text-purple-600 shadow-sm' 
+								: 'border-transparent text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'}
+						`}
+					>
+						Results
+					</button>
 				</div>
 
-				<!-- JSON Body Input -->
-				<div class="p-5 flex flex-col gap-2">
-					<div class="flex justify-between items-center">
-						<label for="body" class="text-xs font-bold uppercase text-slate-500 tracking-wider">
-							JSON Body
-						</label>
-						<span class="text-[10px] text-slate-400 bg-slate-100 px-1 rounded">Optional</span>
-					</div>
-					<textarea
-						id="body"
-						value={typeof selectedNode.data.body === 'string' 
-							? selectedNode.data.body 
-							: (selectedNode.data.body ? JSON.stringify(selectedNode.data.body, null, 2) : '')}
-						oninput={(e) => updateNodeData('body', e.currentTarget.value)}
-						class="border border-slate-300 p-2 rounded-md text-xs font-mono h-24 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-						placeholder={'{"key": "{{node_1.body.value}}"}'}
-					></textarea>
-				</div>
-
-				<hr class="border-slate-100 my-4" />
-
-				<!-- Sidebar Result -->
-				<div class="p-5 flex flex-col gap-3">
-					<div class="flex justify-between items-center">
-						<h3 class="text-xs font-bold uppercase text-slate-500 tracking-wider">
-							Last Execution
-						</h3>
-						<!-- Status Badge -->
-						{#if selectedNode.data.status}
-							<span class={
-								`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide
-								${selectedNode.data.status === 'success' ? 'bg-green-100 text-green-700' : ''}
-								${selectedNode.data.status === 'error' ? 'bg-red-100 text-red-700' : ''}
-								${selectedNode.data.status === 'running' ? 'bg-blue-100 text-blue-700' : ''}
-							`}>
-								{selectedNode.data.status}
-							</span>
-						{/if}
-					</div>
-
-					<!-- JSON Output -->
-					{#if selectedNode.data.result}
-						<div class="relative group">
-							<pre class="bg-slate-900 text-slate-50 p-3 rounded-md text-xs font-mono overflow-x-auto max-h-60 shadow-inner custom-scrollbar">{JSON.stringify(selectedNode.data.result, null, 2)}</pre>
-							<!-- Copy hint -->
-							<div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-								<span class="text-[10px] text-slate-400 bg-slate-800 px-1 rounded">JSON</span>
-							</div>
+				<!-- 3. CONTENT AREA -->
+				<div class="p-5 flex flex-col gap-6 overflow-y-auto grow bg-sidebar relative">
+					
+					<!-- VIEW: CONFIGURATION -->
+					{#if activeTab === 'config'}
+						<!-- URL Input -->
+						<div class="flex flex-col gap-2">
+							<label for="url" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+								Target URL
+							</label>
+							<input
+								id="url"
+								type="text"
+								value={selectedNode.data.url}
+								oninput={(e) => updateNodeData('url', e.currentTarget.value)}
+                            	class="border border-input bg-background p-2.5 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-shadow font-mono text-foreground"
+                            	placeholder="https://api.example.com"
+                            />
 						</div>
-					{:else}
-						<div class="p-4 border border-dashed border-slate-200 rounded-md text-center">
-							<span class="text-xs text-slate-400">No data yet. Run the flow!</span>
+
+						<!-- Method Input -->
+						<div class="flex flex-col gap-2">
+							<label for="method" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+								HTTP Method
+							</label>
+							<select
+								id="method"
+								value={selectedNode.data.method}
+								onchange={(e) => updateNodeData('method', e.currentTarget.value)}
+								class="w-full border border-input bg-background p-2 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-all text-foreground"
+							>
+								<option value="GET">GET</option>
+								<option value="POST">POST</option>
+								<option value="PUT">PUT</option>
+								<option value="DELETE">DELETE</option>
+								<option value="PATCH">PATCH</option>
+							</select>
+						</div>
+
+						<!-- Headers Input -->
+						<div class="flex flex-col gap-2">
+							<div class="flex justify-between items-center">
+								<span class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+									Headers
+								</span>
+								<button 
+									onclick={() => {
+										// Logic to add a temporary unique key
+										const key = `New-Header-${Math.floor(Math.random() * 100)}`;
+										updateHeaderValue(key, '');
+									}}
+									class="text-[10px] bg-accent hover:bg-accent-foreground text-accent-foreground px-2 py-1 rounded transition-colors"
+								>
+									+ Add
+								</button>
+							</div>
+							
+							{#if selectedNode.data.headers && Object.keys(selectedNode.data.headers).length > 0}
+								<div class="flex flex-col gap-2 border border-sidebar-border rounded p-2 bg-sidebar-accent">
+									{#each Object.entries(selectedNode.data.headers) as [key, value]}
+										<div class="flex gap-1 items-center">
+											<!-- Key Input -->
+											<input 
+												type="text" 
+												value={key}
+												onchange={(e) => updateHeaderKey(key, e.currentTarget.value)}
+												class="w-1/3 text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
+												placeholder="Key"
+											/>
+											<span class="text-slate-400">:</span>
+											<!-- Value Input -->
+											<input 
+												type="text" 
+												value={value}
+												oninput={(e) => updateHeaderValue(key, e.currentTarget.value)}
+												class="grow text-xs p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none font-mono"
+												placeholder="Value"
+											/>
+											<!-- Remove Button -->
+											<button 
+												onclick={() => removeHeader(key)}
+												class="text-slate-400 hover:text-red-500 px-1"
+												title="Remove Header"
+											>
+												&times;
+											</button>
+										</div>
+									{/each}
+								</div>
+							{:else}
+								 <div class="text-xs text-slate-400 italic p-2 border border-dashed border-slate-200 rounded">
+									No headers configured.
+								</div>
+							{/if}
+						</div>
+
+						<!-- JSON Body -->
+						<div class="flex flex-col gap-2 h-full">
+							<div class="flex justify-between items-center">
+								<label for="body" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
+									JSON Body
+								</label>
+								<span class="text-[10px] text-muted-foreground bg-accent px-1 rounded">Optional</span>
+							</div>
+							<textarea
+								id="body"
+								value={typeof selectedNode.data.body === 'string' 
+									? selectedNode.data.body 
+									: (selectedNode.data.body ? JSON.stringify(selectedNode.data.body, null, 2) : '')}
+								oninput={(e) => updateNodeData('body', e.currentTarget.value)}
+								class="border border-slate-300 p-2 rounded-md text-xs font-mono grow min-h-[150px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+								placeholder={'{"key": "{{node_1.body.value}}", "secret": "{{$env.API_KEY}}"}'}
+							></textarea>
+						</div>
+					{/if}
+
+					<!-- VIEW: SECRETS -->
+					{#if activeTab === 'secrets'}
+					<div class="flex flex-col gap-4">
+						<div class="bg-blue-50 text-blue-800 p-3 rounded-md text-xs border border-blue-100">
+							<strong>Secrets Vault</strong><br/>
+							Store API keys securely here. They are encrypted in the database and never shown in the browser.
+						</div>
+						
+						<!-- Add Secret Form -->
+						<div class="flex flex-col gap-2 border-b pb-4 border-sidebar-border">
+							<label for="secret-key" class="text-xs font-bold uppercase text-muted-foreground">Key Name</label>
+							<input 
+								id="secret-key" 
+								type="text" 
+								bind:value={secretKeyInput}
+								placeholder="OPENAI_API_KEY" 
+								class="border p-2 rounded text-xs font-mono uppercase" 
+							/>
+							
+							<label for="secret-value" class="text-xs font-bold uppercase text-muted-foreground mt-2">Value</label>
+							<input 
+								id="secret-value" 
+								type="password" 
+								bind:value={secretValueInput}
+								placeholder="sk-..." 
+								class="border p-2 rounded text-xs" 
+							/>
+							
+							<button 
+								onclick={saveSecret}
+								class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
+							>
+								Save Secret
+							</button>
+						</div>
+
+						<!-- Available Secrets List -->
+						<div class="flex flex-col gap-2">
+							<span class="text-xs font-bold uppercase text-muted-foreground">Available Secrets</span>
+							
+							{#each availableSecrets as secret}
+								<div class="flex items-center justify-between p-2 bg-sidebar-accent rounded border border-sidebar-border">
+									<code class="text-xs font-mono text-foreground">$env.{secret.key}</code>
+									<button 
+										onclick={() => copyToClipboard(`{{$env.${secret.key}}}`)}
+										class="text-[10px] bg-accent border border-border px-2 py-1 rounded hover:bg-accent-foreground text-accent-foreground"
+									>
+										Copy
+									</button>
+								</div>
+							{:else}
+								<div class="text-xs text-muted-foreground italic">No secrets saved yet.</div>
+							{/each}
+						</div>
+					</div>
+					{/if}
+
+					<!-- VIEW: RESULTS -->
+					{#if activeTab === 'test'}
+						<div class="flex flex-col gap-3">
+							<div class="flex justify-between items-center">
+								<h3 class="text-xs font-bold uppercase text-slate-500 tracking-wider">
+									Last Execution
+								</h3>
+								{#if selectedNode.data.status}
+									<span class={
+										`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide
+										${selectedNode.data.status === 'success' ? 'bg-green-100 text-green-700' : ''}
+										${selectedNode.data.status === 'error' ? 'bg-red-100 text-red-700' : ''}
+										${selectedNode.data.status === 'running' ? 'bg-blue-100 text-blue-700' : ''}
+									`}>
+										{selectedNode.data.status}
+									</span>
+								{/if}
+							</div>
+
+							{#if selectedNode.data.result}
+								<pre class="bg-slate-950 text-slate-50 dark:bg-black dark:text-green-400 p-3 rounded-md text-xs font-mono overflow-x-auto shadow-inner custom-scrollbar">{JSON.stringify(selectedNode.data.result, null, 2)}</pre>
+							{:else}
+								<div class="p-8 border border-dashed border-slate-200 rounded-md text-center flex flex-col items-center gap-2">
+									<span class="text-2xl">🧪</span>
+									<span class="text-xs text-slate-400">No results yet.<br/>Run the flow to see data here.</span>
+								</div>
+							{/if}
 						</div>
 					{/if}
 				</div>
 
-				<!-- Sidebar Footer -->
-				<div class="p-4 border-t border-slate-100 bg-slate-50">
-					<div class="flex items-center justify-center gap-2 text-xs text-slate-500">
-						<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-						Changes saved automatically
+				<!-- FIXED FOOTER -->
+				<div class="p-4 border-t border-sidebar-border bg-sidebar-accent text-center">
+					<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+						{#if selectedNode.data.status === 'running'}
+							<span class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+							Running...
+						{:else}
+							<span class="w-2 h-2 rounded-full bg-green-500"></span>
+							Auto-saved
+						{/if}
 					</div>
 				</div>
 			</div>
