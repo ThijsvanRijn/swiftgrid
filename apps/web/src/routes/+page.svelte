@@ -15,6 +15,7 @@
 	// Stores
 	import { flowStore } from '$lib/stores/flowStore.svelte';
 	import { themeStore } from '$lib/stores/themeStore.svelte';
+	import { secretsStore } from '$lib/stores/secretsStore.svelte';
 
 	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -207,36 +208,6 @@
 	}
 
 	// =================================================
-	// SECRETS (will move to secretsStore later)
-	// =================================================
-
-	type SecretItem = { key: string; createdAt: string };
-	let availableSecrets = $state<SecretItem[]>([]);
-	let secretKeyInput = $state('');
-	let secretValueInput = $state('');
-
-	async function loadSecrets() {
-		const res = await fetch('/api/secrets');
-		if (res.ok) availableSecrets = await res.json();
-	}
-
-	async function saveSecret() {
-		if (!secretKeyInput || !secretValueInput) return;
-
-		const res = await fetch('/api/secrets', {
-			method: 'POST',
-			body: JSON.stringify({ key: secretKeyInput, value: secretValueInput })
-		});
-
-		if (res.ok) {
-			secretKeyInput = '';
-			secretValueInput = '';
-			loadSecrets();
-			alert("Secret saved!");
-		}
-	}
-
-	// =================================================
 	// FLOW PERSISTENCE (will move to flowPersistence later)
 	// =================================================
 
@@ -286,7 +257,7 @@
 
 		// Load data
 		loadLatestFlow();
-		loadSecrets();
+		secretsStore.load();
 
 		// SSE: Stream node results from the Rust worker
 		const eventSource = new EventSource('/api/stream');
@@ -668,7 +639,7 @@
 							<input
 								id="secret-key"
 								type="text"
-								bind:value={secretKeyInput}
+								bind:value={secretsStore.keyInput}
 								placeholder="OPENAI_API_KEY"
 								class="border p-2 rounded text-xs font-mono uppercase"
 							/>
@@ -677,13 +648,13 @@
 							<input
 								id="secret-value"
 								type="password"
-								bind:value={secretValueInput}
+								bind:value={secretsStore.valueInput}
 								placeholder="sk-..."
 								class="border p-2 rounded text-xs"
 							/>
 
 							<button
-								onclick={saveSecret}
+								onclick={secretsStore.save}
 								class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 							>
 								Save Secret
@@ -694,7 +665,7 @@
 						<div class="flex flex-col gap-2">
 							<span class="text-xs font-bold uppercase text-muted-foreground">Available Secrets</span>
 
-							{#each availableSecrets as secret}
+							{#each secretsStore.secrets as secret}
 								<div class="flex items-center justify-between p-2 bg-sidebar-accent rounded border border-sidebar-border">
 									<code class="text-xs font-mono text-foreground">$env.{secret.key}</code>
 									<button
