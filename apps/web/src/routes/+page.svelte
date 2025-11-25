@@ -19,6 +19,7 @@
 
 	// Services
 	import { runFlow, handleExecutionResult } from '$lib/services/executionService';
+	import { saveFlow, loadLatestFlow } from '$lib/services/flowPersistence';
 
 	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -43,47 +44,6 @@
 	const onPaneClick = () => {
 		flowStore.selectNode(null);
 	};
-
-	// =================================================
-	// FLOW PERSISTENCE (will move to flowPersistence later)
-	// =================================================
-
-	async function saveFlow() {
-		try {
-			const response = await fetch('/api/flows', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ nodes: flowStore.nodes, edges: flowStore.edges })
-			});
-
-			if (response.ok) {
-				const btn = document.getElementById('saveBtn');
-				if (btn) {
-					const originalText = btn.innerText;
-					btn.innerText = "Saved!";
-					setTimeout(() => btn.innerText = originalText, 2000);
-				}
-			}
-		} catch (e) {
-			console.error("Save failed", e);
-			alert("Failed to save flow to DB");
-		}
-	}
-
-	async function loadLatestFlow() {
-		try {
-			const response = await fetch('/api/flows');
-			const data = await response.json();
-
-			if (data.graph) {
-				const graph = data.graph as any;
-				flowStore.setFlow(graph.nodes || [], graph.edges || []);
-				console.log("Flow loaded from DB!");
-			}
-		} catch (e) {
-			console.error("Load failed", e);
-		}
-	}
 
 	// =================================================
 	// LIFECYCLE
