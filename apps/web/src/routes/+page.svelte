@@ -39,7 +39,7 @@
 	// Local UI state
 	let flowWrapper: HTMLDivElement | null = null;
 	let activeTab = $state<'config' | 'secrets' | 'test'>('config');
-	let sseConnected = $state(false);
+	let sseStatus = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
 
 	// Clicking a node should focus the config tab for quick edits.
 	const onNodeClick = ({ node }: { node: AppNode }) => {
@@ -63,8 +63,8 @@
 		secretsStore.load();
 
 		// SSE: Connect with auto-reconnect
-		sseService.setConnectionCallback((connected) => {
-			sseConnected = connected;
+		sseService.setStatusCallback((status) => {
+			sseStatus = status;
 		});
 		sseService.connect();
 
@@ -112,9 +112,15 @@
 		<div class="flex items-center gap-4">
 			<h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
 			<!-- Connection status -->
-			<div class="flex items-center gap-1.5 text-xs text-muted-foreground" title={sseConnected ? 'Connected to worker' : 'Disconnected'}>
-				<span class={`w-2 h-2 rounded-full ${sseConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`}></span>
-				{sseConnected ? 'Live' : 'Offline'}
+			<div class="flex items-center gap-1.5 text-xs text-muted-foreground" title={
+				sseStatus === 'connected' ? 'Receiving results from worker' :
+				sseStatus === 'connecting' ? 'Connecting to stream...' : 'Connection lost'
+			}>
+				<span class={`w-2 h-2 rounded-full ${
+					sseStatus === 'connected' ? 'bg-green-500' :
+					sseStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500 animate-pulse'
+				}`}></span>
+				{sseStatus === 'connected' ? 'Live' : sseStatus === 'connecting' ? 'Connecting...' : 'Offline'}
 			</div>
 			<!-- Quick theme toggle -->
 			<button

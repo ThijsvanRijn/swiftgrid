@@ -15,6 +15,9 @@ export function GET() {
         async start(controller) {
             console.log('SSE: Client connected');
 
+            // Send immediate "connected" event so the browser knows we're live
+            controller.enqueue(': connected\n\n');
+
             // Heartbeat keeps the connection alive through proxies/load balancers
             heartbeatTimer = setInterval(() => {
                 if (active) {

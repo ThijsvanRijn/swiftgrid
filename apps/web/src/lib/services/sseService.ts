@@ -7,9 +7,10 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_MS = 2000;
 
-// Callbacks for UI feedback
-type ConnectionCallback = (connected: boolean) => void;
-let onConnectionChange: ConnectionCallback | null = null;
+// Status callback for UI feedback
+type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
+type StatusCallback = (status: ConnectionStatus) => void;
+let onStatusChange: StatusCallback | null = null;
 
 // Connects to the SSE stream with auto-reconnect
 function connect() {
@@ -18,29 +19,26 @@ function connect() {
     }
 
     console.log('SSE: Connecting...');
+    onStatusChange?.('connecting');
     eventSource = new EventSource('/api/stream');
 
     eventSource.onopen = () => {
         console.log('SSE: Connected');
         reconnectAttempts = 0;
-        onConnectionChange?.(true);
+        onStatusChange?.('connected');
     };
 
     eventSource.onmessage = (event) => {
+        // SSE comments (starting with :) are filtered by the browser
+        // so we only receive actual data messages here
         const result: ExecutionResult = JSON.parse(event.data);
-
-        // Ignore heartbeat messages
-        if ((result as any).type === 'heartbeat') {
-            return;
-        }
-
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
         handleExecutionResult(result.node_id, isSuccess, result.body);
     };
 
     eventSource.onerror = () => {
         console.warn('SSE: Connection error');
-        onConnectionChange?.(false);
+        onStatusChange?.('disconnected');
         eventSource?.close();
         eventSource = null;
 
@@ -62,13 +60,13 @@ function disconnect() {
         console.log('SSE: Disconnecting');
         eventSource.close();
         eventSource = null;
-        onConnectionChange?.(false);
+        onStatusChange?.('disconnected');
     }
 }
 
-// Sets a callback for connection state changes
-function setConnectionCallback(callback: ConnectionCallback | null) {
-    onConnectionChange = callback;
+// Sets a callback for status changes
+function setStatusCallback(callback: StatusCallback | null) {
+    onStatusChange = callback;
 }
 
 // Checks if currently connected
@@ -79,7 +77,7 @@ function isConnected() {
 export const sseService = {
     connect,
     disconnect,
-    setConnectionCallback,
+    setStatusCallback,
     isConnected
 };
 
