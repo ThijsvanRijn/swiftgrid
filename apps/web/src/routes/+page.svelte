@@ -12,8 +12,9 @@
 	import type { AppNode, AppNodeData } from '$lib/types/app';
 	import { type WorkerJob, HttpMethod, type ExecutionResult } from '$lib/types/worker';
 
-	// Flow state lives in its own store now
+	// Stores
 	import { flowStore } from '$lib/stores/flowStore.svelte';
+	import { themeStore } from '$lib/stores/themeStore.svelte';
 
 	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -28,7 +29,6 @@
 	// Local UI state
 	let flowWrapper: HTMLDivElement | null = null;
 	let activeTab = $state<'config' | 'secrets' | 'test'>('config');
-	let isDark = $state(false);
 
 	// Clicking a node should focus the config tab for quick edits.
 	const onNodeClick = ({ node }: { node: AppNode }) => {
@@ -237,26 +237,6 @@
 	}
 
 	// =================================================
-	// THEME (will move to themeStore later)
-	// =================================================
-
-	function toggleTheme() {
-		isDark = !isDark;
-		updateTheme();
-	}
-
-	function updateTheme() {
-		const html = document.documentElement;
-		if (isDark) {
-			html.classList.add('dark');
-			localStorage.setItem('theme', 'dark');
-		} else {
-			html.classList.remove('dark');
-			localStorage.setItem('theme', 'light');
-		}
-	}
-
-	// =================================================
 	// FLOW PERSISTENCE (will move to flowPersistence later)
 	// =================================================
 
@@ -302,14 +282,7 @@
 	// =================================================
 
 	onMount(() => {
-		// Theme init
-		const stored = localStorage.getItem('theme');
-		if (stored) {
-			isDark = stored === 'dark';
-		} else {
-			isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-		}
-		updateTheme();
+		themeStore.init();
 
 		// Load data
 		loadLatestFlow();
@@ -411,10 +384,10 @@
 			<h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
 			<!-- Quick theme toggle -->
 			<button
-				onclick={toggleTheme}
+				onclick={themeStore.toggle}
 				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground text-muted-foreground transition-colors"
 			>
-				{#if isDark} 🌙 {:else} ☀️ {/if}
+				{#if themeStore.isDark} 🌙 {:else} ☀️ {/if}
 			</button>
 		</div>
 		<div class="flex gap-2">
@@ -445,11 +418,11 @@
 			</button>
 			<!-- Icon toggle -->
 			<button
-				onclick={toggleTheme}
+				onclick={themeStore.toggle}
 				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors border border-border bg-background text-foreground"
 				title="Toggle Theme"
 			>
-				{#if isDark}
+				{#if themeStore.isDark}
 					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
 				{:else}
 					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
@@ -468,13 +441,13 @@
 				bind:edges={flowStore.edges}
 				bind:viewport={flowStore.viewport}
 				nodeTypes={nodeTypes}
-				colorMode={isDark ? 'dark' : 'light'}
+				colorMode={themeStore.isDark ? 'dark' : 'light'}
 				onnodeclick={onNodeClick}
 				onpaneclick={onPaneClick}
 				fitView
 				class="bg-muted/20"
 			>
-				<Background patternColor={isDark ? '#334155' : '#cbd5e1'} gap={20} />
+				<Background patternColor={themeStore.isDark ? '#334155' : '#cbd5e1'} gap={20} />
 				<Controls />
 			</SvelteFlow>
 		</div>
