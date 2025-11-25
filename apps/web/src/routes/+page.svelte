@@ -9,13 +9,16 @@
 	import { onMount } from 'svelte';
 
 	// Shared app + worker types so the UI matches the backend shapes.
-	import type { AppNode, AppNodeData } from '$lib/types/app';
-	import { type WorkerJob, HttpMethod, type ExecutionResult } from '$lib/types/worker';
+	import type { AppNode } from '$lib/types/app';
+	import type { ExecutionResult } from '$lib/types/worker';
 
 	// Stores
 	import { flowStore } from '$lib/stores/flowStore.svelte';
 	import { themeStore } from '$lib/stores/themeStore.svelte';
 	import { secretsStore } from '$lib/stores/secretsStore.svelte';
+
+	// Services
+	import { runFlow, handleExecutionResult } from '$lib/services/executionService';
 
 	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -40,172 +43,6 @@
 	const onPaneClick = () => {
 		flowStore.selectNode(null);
 	};
-
-	// =================================================
-	// EXECUTION LOGIC (will move to executionService later)
-	// =================================================
-
-	async function executeNode(nodeId: string) {
-		const node = flowStore.getNode(nodeId);
-		if (!node) return;
-
-		// Set UI to "Running" immediately
-		flowStore.updateNodeStatus(nodeId, 'running');
-
-		let payload: WorkerJob;
-
-		// --- Code node path ---
-		if (node.type === 'code-execution') {
-			// Pull inputs from the editor and resolve {{vars}} before running JS.
-			let finalInputs = undefined;
-
-			if (node.data.inputs) {
-				const inputStr = typeof node.data.inputs === 'string'
-					? node.data.inputs
-					: JSON.stringify(node.data.inputs);
-
-				const resolvedStr = resolveVariables(inputStr);
-
-				try {
-					finalInputs = JSON.parse(resolvedStr);
-				} catch (e) {
-					console.warn(`Failed to parse Inputs JSON for Node ${nodeId}`, e);
-					finalInputs = {};
-				}
-			}
-
-			// Build the worker payload for JS execution.
-			payload = {
-				id: node.id,
-				node: {
-					type: 'CODE',
-					data: {
-						code: node.data.code || '',
-						inputs: finalInputs
-					}
-				}
-			};
-		}
-
-		// --- HTTP node path ---
-		else {
-			// Quick guard so we don't fire empty requests.
-			if (!node.data.url || !node.data.method) {
-				console.warn(`Skipping Node ${nodeId}: Missing URL or Method`);
-				flowStore.updateNodeStatus(nodeId, 'idle');
-				return;
-			}
-
-			// Replace {{ }} inside the URL.
-			const finalUrl = resolveVariables(node.data.url);
-
-			// Clone headers and resolve each value.
-			let finalHeaders: Record<string, string> | undefined = undefined;
-			if (node.data.headers) {
-				finalHeaders = {};
-				for (const [key, val] of Object.entries(node.data.headers)) {
-					finalHeaders[key] = resolveVariables(String(val));
-				}
-			}
-
-			// Allow body to stay JSON or fall back to a string.
-			let finalBody = undefined;
-			if (node.data.body) {
-				const bodyString = typeof node.data.body === 'string'
-					? node.data.body
-					: JSON.stringify(node.data.body);
-
-				const resolvedBodyString = resolveVariables(bodyString);
-				try {
-					finalBody = JSON.parse(resolvedBodyString);
-				} catch (e) {
-					finalBody = resolvedBodyString;
-				}
-			}
-
-			// Final worker payload for HTTP nodes.
-			payload = {
-				id: node.id,
-				node: {
-					type: 'HTTP',
-					data: {
-						url: finalUrl,
-						method: node.data.method as HttpMethod,
-						headers: finalHeaders,
-						body: finalBody
-					}
-				}
-			};
-		}
-
-		console.log(`Executing ${node.type}`, payload);
-
-		// Send to backend
-		try {
-			await fetch('/api/run', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(payload)
-			});
-		} catch (e) {
-			console.error('Network error', e);
-			flowStore.updateNodeStatus(nodeId, 'error');
-		}
-	}
-
-	// Helper: Dig into an object using a path string "body.html_url"
-	function getDeepValue(obj: any, path: string): any {
-		return path.split('.').reduce((acc, part) => acc && acc[part], obj);
-	}
-
-	// The Interpolator: Replaces {{node_id.field}} with actual data
-	function resolveVariables(text: string): string {
-		if (!text) return text;
-
-		return text.replace(/{{(.*?)}}/g, (match, variablePath) => {
-			const cleanPath = variablePath.trim();
-
-			// If it starts with $env, ignore it! (It's a secret)
-			if (cleanPath.startsWith('$env.')) {
-				return match;
-			}
-
-			const parts = cleanPath.split('.');
-			const targetNodeId = parts[0];
-			const valuePath = parts.slice(1).join('.');
-
-			const targetNode = flowStore.getNode(targetNodeId);
-
-			if (!targetNode) {
-				console.warn(`Variable Resolver: Node ${targetNodeId} not found.`);
-				return `{{${cleanPath}}}`;
-			}
-			if (!targetNode.data.result) {
-				console.warn(`Variable Resolver: Node ${targetNodeId} has no results yet.`);
-				return '';
-			}
-
-			const value = getDeepValue(targetNode.data.result, valuePath);
-			return value !== undefined ? String(value) : '';
-		});
-	}
-
-	function runFlow() {
-		// Collect destination IDs so we can find starting points quickly.
-		const targetIds = new Set(flowStore.edges.map((e) => e.target));
-
-		// Roots are nodes no one points to, so we kick things off there.
-		const rootNodes = flowStore.nodes.filter((n) => !targetIds.has(n.id));
-
-		if (rootNodes.length === 0 && flowStore.nodes.length > 0) {
-			alert('Cycle detected or no roots! Running all nodes as fallback.');
-			flowStore.nodes.forEach((n) => executeNode(n.id));
-			return;
-		}
-
-		console.log('Starting Flow with Roots:', rootNodes.map((n) => n.id));
-		rootNodes.forEach((n) => executeNode(n.id));
-	}
 
 	// =================================================
 	// FLOW PERSISTENCE (will move to flowPersistence later)
@@ -265,18 +102,7 @@
 		eventSource.onmessage = (event) => {
 			const result: ExecutionResult = JSON.parse(event.data);
 			const isSuccess = result.status_code >= 200 && result.status_code < 300;
-
-			flowStore.updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
-
-			// Daisy chain: trigger next nodes on success
-			if (isSuccess) {
-				const outgoingEdges = flowStore.edges.filter(e => e.source === result.node_id);
-				if (outgoingEdges.length > 0) {
-					setTimeout(() => {
-						outgoingEdges.forEach(edge => executeNode(edge.target));
-					}, 500);
-				}
-			}
+			handleExecutionResult(result.node_id, isSuccess, result.body);
 		};
 
 		return () => eventSource.close();
