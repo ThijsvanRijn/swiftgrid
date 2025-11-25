@@ -1,5 +1,5 @@
 import type { Node } from '@xyflow/svelte';
-import type { HttpMethod } from './worker'; // Import from your typeshare file
+import type { HttpMethod } from '@swiftgrid/shared';
 
 // 1. Define the Data Shape
 export type AppNodeData = {

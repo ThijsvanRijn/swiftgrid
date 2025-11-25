@@ -1,5 +1,5 @@
 import type { AppNode } from '$lib/types/app';
-import { type WorkerJob, HttpMethod } from '$lib/types/worker';
+import { type WorkerJob, HttpMethod } from '@swiftgrid/shared';
 import { flowStore } from '$lib/stores/flowStore.svelte';
 
 // Helper: Dig into an object using a path string "body.html_url"

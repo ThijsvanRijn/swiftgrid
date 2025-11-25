@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
 import { secrets } from '$lib/server/db/schema';
-import type { WorkerJob } from '$lib/types/worker';
+import { type WorkerJob, REDIS_STREAMS } from '@swiftgrid/shared';
 import { env } from '$env/dynamic/private';
 
 // Connect to Redis (env var or fallback to localhost)
@@ -71,7 +71,7 @@ export async function POST({ request }) {
 
     // Push to Redis
     const streamId = await redis.xadd(
-        'swiftgrid_stream', 
+        REDIS_STREAMS.JOBS, 
         '*', 
         'payload', 
         JSON.stringify(job)

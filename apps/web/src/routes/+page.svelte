@@ -122,13 +122,6 @@
 				}`}></span>
 				{sseStatus === 'connected' ? 'Live' : sseStatus === 'connecting' ? 'Connecting...' : 'Offline'}
 			</div>
-			<!-- Quick theme toggle -->
-			<button
-				onclick={themeStore.toggle}
-				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground text-muted-foreground transition-colors"
-			>
-				{#if themeStore.isDark} 🌙 {:else} ☀️ {/if}
-			</button>
 		</div>
 		<div class="flex gap-2">
 			<button

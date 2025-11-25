@@ -1,4 +1,4 @@
-import type { ExecutionResult } from '$lib/types/worker';
+import type { ExecutionResult } from '@swiftgrid/shared';
 import { handleExecutionResult } from './executionService';
 
 // SSE connection state

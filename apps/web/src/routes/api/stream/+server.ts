@@ -1,12 +1,12 @@
 import Redis from 'ioredis';
 import { env } from '$env/dynamic/private';
+import { REDIS_STREAMS } from '@swiftgrid/shared';
 
 const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30s
 const REDIS_BLOCK_MS = 10000; // Block for 10s waiting for data
 
 export function GET() {
     const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
-    const streamKey = 'swiftgrid_results';
 
     let active = true;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -37,7 +37,7 @@ export function GET() {
 
             while (active) {
                 try {
-                    const result = await redis.xread('BLOCK', REDIS_BLOCK_MS, 'STREAMS', streamKey, lastId);
+                    const result = await redis.xread('BLOCK', REDIS_BLOCK_MS, 'STREAMS', REDIS_STREAMS.RESULTS, lastId);
 
                     if (result) {
                         const [, messages] = result[0];
