@@ -3,15 +3,17 @@
 		SvelteFlow,
 		Background,
 		Controls,
-		type Edge,
-		type Viewport,
 		type XYPosition
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
+	import { onMount } from 'svelte';
 
 	// Shared app + worker types so the UI matches the backend shapes.
 	import type { AppNode, AppNodeData } from '$lib/types/app';
-	import { type WorkerJob, HttpMethod } from '$lib/types/worker';
+	import { type WorkerJob, HttpMethod, type ExecutionResult } from '$lib/types/worker';
+
+	// Flow state lives in its own store now
+	import { flowStore } from '$lib/stores/flowStore.svelte';
 
 	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -23,66 +25,31 @@
 		'code-execution': CodeExecutionNodeComponent
 	};
 
-	// Keep node state typed so drag/drop stays predictable.
-	let nodes = $state.raw<AppNode[]>([
-		{
-			id: '1',
-			type: 'http-request', // first node so the canvas isn't empty
-			data: {
-				label: 'HTTP Request',
-				url: 'https://api.github.com/zen',
-				method: 'GET',
-				status: 'idle'
-			},
-			position: { x: 250, y: 50 }
-		}
-	]);
-
-	let edges = $state.raw<Edge[]>([]);
-
-	let viewport = $state.raw<Viewport>({ x: 0, y: 0, zoom: 1 });
+	// Local UI state
 	let flowWrapper: HTMLDivElement | null = null;
-
-	let selectedNodeId = $state<string | null>(null);
-	// Handy derived helper so the sidebar always has fresh data.
-	let selectedNode = $derived(nodes.find((n) => n.id === selectedNodeId));
-
-	/**
-	 * Updates node data immutably to trigger Svelte Flow reactivity
-	 */
-	function updateNodeData(key: keyof AppNodeData, value: any) {
-		if (!selectedNodeId) return;
-
-		nodes = nodes.map((n) => {
-			if (n.id === selectedNodeId) {
-				return {
-					...n,
-					data: {
-						...n.data,
-						[key]: value
-					}
-				};
-			}
-			return n;
-		});
-	}
+	let activeTab = $state<'config' | 'secrets' | 'test'>('config');
+	let isDark = $state(false);
 
 	// Clicking a node should focus the config tab for quick edits.
 	const onNodeClick = ({ node }: { node: AppNode }) => {
-		selectedNodeId = node.id;
+		flowStore.selectNode(node.id);
 		activeTab = 'config';
 	};
 
 	const onPaneClick = () => {
-		selectedNodeId = null;
+		flowStore.selectNode(null);
 	};
 
+	// =================================================
+	// EXECUTION LOGIC (will move to executionService later)
+	// =================================================
+
 	async function executeNode(nodeId: string) {
-		const node = nodes.find((n) => n.id === nodeId);
+		const node = flowStore.getNode(nodeId);
 		if (!node) return;
 
 		// Set UI to "Running" immediately
-		updateNodeStatus(nodeId, 'running');
+		flowStore.updateNodeStatus(nodeId, 'running');
 
 		let payload: WorkerJob;
 
@@ -92,7 +59,6 @@
 			let finalInputs = undefined;
 
 			if (node.data.inputs) {
-				// Treat as string for variable replacement {{...}}
 				const inputStr = typeof node.data.inputs === 'string'
 					? node.data.inputs
 					: JSON.stringify(node.data.inputs);
@@ -103,7 +69,6 @@
 					finalInputs = JSON.parse(resolvedStr);
 				} catch (e) {
 					console.warn(`Failed to parse Inputs JSON for Node ${nodeId}`, e);
-					// If parse fails, defaulting to empty object is safer for JS execution
 					finalInputs = {};
 				}
 			}
@@ -126,8 +91,7 @@
 			// Quick guard so we don't fire empty requests.
 			if (!node.data.url || !node.data.method) {
 				console.warn(`Skipping Node ${nodeId}: Missing URL or Method`);
-				// Reset status since we aren't running
-				updateNodeStatus(nodeId, 'idle');
+				flowStore.updateNodeStatus(nodeId, 'idle');
 				return;
 			}
 
@@ -175,9 +139,7 @@
 
 		console.log(`Executing ${node.type}`, payload);
 
-		// =================================================
-		// SEND TO BACKEND
-		// =================================================
+		// Send to backend
 		try {
 			await fetch('/api/run', {
 				method: 'POST',
@@ -186,7 +148,7 @@
 			});
 		} catch (e) {
 			console.error('Network error', e);
-			updateNodeStatus(nodeId, 'error');
+			flowStore.updateNodeStatus(nodeId, 'error');
 		}
 	}
 
@@ -199,9 +161,8 @@
 	function resolveVariables(text: string): string {
 		if (!text) return text;
 
-		// Regex to find {{ whatever }}
 		return text.replace(/{{(.*?)}}/g, (match, variablePath) => {
-			const cleanPath = variablePath.trim(); // e.g., "node_1.body.login"
+			const cleanPath = variablePath.trim();
 
 			// If it starts with $env, ignore it! (It's a secret)
 			if (cleanPath.startsWith('$env.')) {
@@ -209,40 +170,35 @@
 			}
 
 			const parts = cleanPath.split('.');
-			const targetNodeId = parts[0]; // "node_1"
-			const valuePath = parts.slice(1).join('.'); // "body.login"
+			const targetNodeId = parts[0];
+			const valuePath = parts.slice(1).join('.');
 
-			// Find the node in our memory
-			const targetNode = nodes.find((n) => n.id === targetNodeId);
+			const targetNode = flowStore.getNode(targetNodeId);
 
-			// Safety checks
 			if (!targetNode) {
 				console.warn(`Variable Resolver: Node ${targetNodeId} not found.`);
-				return `{{${cleanPath}}}`; // Leave it alone if not found
+				return `{{${cleanPath}}}`;
 			}
 			if (!targetNode.data.result) {
 				console.warn(`Variable Resolver: Node ${targetNodeId} has no results yet.`);
-				return ''; // Return empty if hasn't run
+				return '';
 			}
 
-			// Dig for the value
 			const value = getDeepValue(targetNode.data.result, valuePath);
-
-			// Return the value (as string) or empty string if undefined
 			return value !== undefined ? String(value) : '';
 		});
 	}
 
 	function runFlow() {
 		// Collect destination IDs so we can find starting points quickly.
-		const targetIds = new Set(edges.map((e) => e.target));
+		const targetIds = new Set(flowStore.edges.map((e) => e.target));
 
 		// Roots are nodes no one points to, so we kick things off there.
-		const rootNodes = nodes.filter((n) => !targetIds.has(n.id));
+		const rootNodes = flowStore.nodes.filter((n) => !targetIds.has(n.id));
 
-		if (rootNodes.length === 0 && nodes.length > 0) {
+		if (rootNodes.length === 0 && flowStore.nodes.length > 0) {
 			alert('Cycle detected or no roots! Running all nodes as fallback.');
-			nodes.forEach((n) => executeNode(n.id));
+			flowStore.nodes.forEach((n) => executeNode(n.id));
 			return;
 		}
 
@@ -250,35 +206,10 @@
 		rootNodes.forEach((n) => executeNode(n.id));
 	}
 
-	function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | 'error', resultBody?: any) {
-		nodes = nodes.map((n) => {
-			if (n.id === id) {
-				// Accept fresh result data but leave the prior one alone when we can.
-				const newResult =
-					resultBody !== undefined ? { body: resultBody } : n.data.result;
+	// =================================================
+	// SECRETS (will move to secretsStore later)
+	// =================================================
 
-				return {
-					...n,
-					class:
-						status === 'running'
-							? 'border-blue-500!'
-							: status === 'success'
-								? 'border-green-500!'
-								: status === 'error'
-									? 'border-red-500!'
-									: '',
-					data: {
-						...n.data,
-						status,
-						result: newResult
-					}
-				};
-			}
-			return n;
-		});
-	}
-
-	// Secrets tab keeps a tiny typed cache so we can render the list fast.
 	type SecretItem = { key: string; createdAt: string };
 	let availableSecrets = $state<SecretItem[]>([]);
 	let secretKeyInput = $state('');
@@ -298,7 +229,6 @@
 		});
 
 		if (res.ok) {
-			// Clear inputs and reload list
 			secretKeyInput = '';
 			secretValueInput = '';
 			loadSecrets();
@@ -306,10 +236,9 @@
 		}
 	}
 
-	import { onMount } from 'svelte';
-	import type { ExecutionResult } from '$lib/types/worker';
-
-	let isDark = $state(false);
+	// =================================================
+	// THEME (will move to themeStore later)
+	// =================================================
 
 	function toggleTheme() {
 		isDark = !isDark;
@@ -327,32 +256,77 @@
 		}
 	}
 
+	// =================================================
+	// FLOW PERSISTENCE (will move to flowPersistence later)
+	// =================================================
+
+	async function saveFlow() {
+		try {
+			const response = await fetch('/api/flows', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ nodes: flowStore.nodes, edges: flowStore.edges })
+			});
+
+			if (response.ok) {
+				const btn = document.getElementById('saveBtn');
+				if (btn) {
+					const originalText = btn.innerText;
+					btn.innerText = "Saved!";
+					setTimeout(() => btn.innerText = originalText, 2000);
+				}
+			}
+		} catch (e) {
+			console.error("Save failed", e);
+			alert("Failed to save flow to DB");
+		}
+	}
+
+	async function loadLatestFlow() {
+		try {
+			const response = await fetch('/api/flows');
+			const data = await response.json();
+
+			if (data.graph) {
+				const graph = data.graph as any;
+				flowStore.setFlow(graph.nodes || [], graph.edges || []);
+				console.log("Flow loaded from DB!");
+			}
+		} catch (e) {
+			console.error("Load failed", e);
+		}
+	}
+
+	// =================================================
+	// LIFECYCLE
+	// =================================================
+
 	onMount(() => {
+		// Theme init
 		const stored = localStorage.getItem('theme');
 		if (stored) {
 			isDark = stored === 'dark';
 		} else {
-			// Falls back to the OS preference on first visit.
 			isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 		}
-
 		updateTheme();
+
+		// Load data
 		loadLatestFlow();
 		loadSecrets();
 
-		// Server-sent events stream node results from the Rust worker.
+		// SSE: Stream node results from the Rust worker
 		const eventSource = new EventSource('/api/stream');
 
 		eventSource.onmessage = (event) => {
 			const result: ExecutionResult = JSON.parse(event.data);
 			const isSuccess = result.status_code >= 200 && result.status_code < 300;
 
-			// Update the node visual state
-			updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
+			flowStore.updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
 
-			// DAISY CHAIN LOGIC (Trigger next node)
+			// Daisy chain: trigger next nodes on success
 			if (isSuccess) {
-				const outgoingEdges = edges.filter(e => e.source === result.node_id);
+				const outgoingEdges = flowStore.edges.filter(e => e.source === result.node_id);
 				if (outgoingEdges.length > 0) {
 					setTimeout(() => {
 						outgoingEdges.forEach(edge => executeNode(edge.target));
@@ -364,8 +338,9 @@
 		return () => eventSource.close();
 	});
 
-	// Simple ID helper for adhoc nodes on the canvas.
-	const getId = () => `node_${Math.random().toString(36).substr(2, 9)}`;
+	// =================================================
+	// CANVAS HELPERS
+	// =================================================
 
 	function screenPointToFlowPosition(point: { x: number; y: number }): XYPosition {
 		if (!flowWrapper) {
@@ -374,8 +349,8 @@
 
 		const bounds = flowWrapper.getBoundingClientRect();
 		return {
-			x: (point.x - bounds.left - viewport.x) / viewport.zoom,
-			y: (point.y - bounds.top - viewport.y) / viewport.zoom
+			x: (point.x - bounds.left - flowStore.viewport.x) / flowStore.viewport.zoom,
+			y: (point.y - bounds.top - flowStore.viewport.y) / flowStore.viewport.zoom
 		};
 	}
 
@@ -391,145 +366,66 @@
 		return screenPointToFlowPosition(centerScreenPoint);
 	}
 
-	function addNode(type: 'http' | 'code' = 'http') {
-		const isHttp = type === 'http';
-		const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
-		const position = getCanvasCenterPosition() ?? fallbackPosition;
-
-		const newNode: AppNode = {
-			id: getId(),
-			type: isHttp ? 'http-request' : 'code-execution', // Switch type
-			data: {
-				label: isHttp ? 'New Request' : 'JS Logic',
-				// Initialize defaults based on type
-				url: isHttp ? '' : undefined,
-				method: isHttp ? 'GET' : undefined,
-				code: isHttp ? undefined : 'return { result: "Hello World" };',
-				status: 'idle'
-			},
-			position
-		};
-		nodes = [...nodes, newNode];
+	function handleAddNode(type: 'http' | 'code') {
+		const position = getCanvasCenterPosition() ?? undefined;
+		flowStore.addNode(type, position);
 	}
 
-    async function saveFlow() {
-        // We send the raw arrays. Svelte 5 proxies (from $state) serialize fine via JSON.stringify
-        try {
-            const response = await fetch('/api/flows', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ nodes, edges })
-            });
+	// =================================================
+	// HEADER HELPERS
+	// =================================================
 
-            if (response.ok) {
-                // Visual feedback (could be a toast later)
-                const btn = document.getElementById('saveBtn');
-                if (btn) {
-                    const originalText = btn.innerText;
-                    btn.innerText = "Saved!";
-                    setTimeout(() => btn.innerText = originalText, 2000);
-                }
-            }
-        } catch (e) {
-            console.error("Save failed", e);
-            alert("Failed to save flow to DB");
-        }
-    }
-
-    async function loadLatestFlow() {
-        try {
-            const response = await fetch('/api/flows');
-            const data = await response.json();
-
-            if (data.graph) {
-                // Restore state from DB
-                // We cast to any because the DB JSONB type is generic
-                const graph = data.graph as any;
-                nodes = graph.nodes || [];
-                edges = graph.edges || [];
-                console.log("Flow loaded from DB!");
-            }
-        } catch (e) {
-            console.error("Load failed", e);
-        }
-    }
-
-	// Sidebar State
-    let activeTab = $state<'config' | 'secrets' | 'test'>('config');
-
-    function copyToClipboard(text: string) {
-        navigator.clipboard.writeText(text);
-        // You could add a small toast notification here in the future
+	function copyToClipboard(text: string) {
+		navigator.clipboard.writeText(text);
 		alert("Copied to clipboard");
-    }
+	}
 
-	// Basic header helpers for the HTTP editor UI.
-    function addHeader() {
-        if (!selectedNodeId) return;
+	function updateHeaderKey(oldKey: string, newKey: string) {
+		if (!flowStore.selectedNode) return;
+		const headers = { ...flowStore.selectedNode.data.headers };
+		const value = headers[oldKey];
+		delete headers[oldKey];
+		headers[newKey] = value;
+		flowStore.updateNodeData('headers', headers);
+	}
 
-        // We treat headers as a generic object in data,
-        // but for editing we need to ensure it exists.
-        nodes = nodes.map(n => {
-            if (n.id === selectedNodeId) {
-                const currentHeaders = n.data.headers || {};
-                // Add a blank entry placeholder if needed,
-                // but easier: just let user type in a new row UI.
-                // Actually, let's initialize it if missing.
-                return { ...n, data: { ...n.data, headers: { ...currentHeaders, "": "" } } };
-            }
-            return n;
-        });
-    }
+	function updateHeaderValue(key: string, newValue: string) {
+		if (!flowStore.selectedNode) return;
+		const headers = { ...flowStore.selectedNode.data.headers };
+		headers[key] = newValue;
+		flowStore.updateNodeData('headers', headers);
+	}
 
-    // Helper to update a specific header key/value
-    // Since standard JSON objects don't preserve order or allow editing keys easily,
-    // we often convert to array for UI, but let's do a direct edit for simplicity.
-    function updateHeaderKey(oldKey: string, newKey: string) {
-        if (!selectedNode) return;
-        const headers = { ...selectedNode.data.headers };
-        const value = headers[oldKey];
-        delete headers[oldKey];
-        headers[newKey] = value; // Re-assign with new key
-        updateNodeData('headers', headers);
-    }
-
-    function updateHeaderValue(key: string, newValue: string) {
-        if (!selectedNode) return;
-        const headers = { ...selectedNode.data.headers };
-        headers[key] = newValue;
-        updateNodeData('headers', headers);
-    }
-
-    function removeHeader(key: string) {
-        if (!selectedNode) return;
-        const headers = { ...selectedNode.data.headers };
-        delete headers[key];
-        updateNodeData('headers', headers);
-    }
+	function removeHeader(key: string) {
+		if (!flowStore.selectedNode) return;
+		const headers = { ...flowStore.selectedNode.data.headers };
+		delete headers[key];
+		flowStore.updateNodeData('headers', headers);
+	}
 </script>
 
 <div class="h-screen w-full flex flex-col text-foreground font-sans bg-background">
 	<!-- Top nav -->
 	<div class="px-6 py-3 border-b border-border flex justify-between items-center bg-card z-10 shadow-xs">
 		<div class="flex items-center gap-4">
-            <h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
-            <!-- Quick theme toggle -->
-            <button
-                onclick={toggleTheme}
-                class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground text-muted-foreground transition-colors"
-            >
-                {#if isDark} 🌙 {:else} ☀️ {/if}
-            </button>
-        </div>
+			<h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
+			<!-- Quick theme toggle -->
+			<button
+				onclick={toggleTheme}
+				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground text-muted-foreground transition-colors"
+			>
+				{#if isDark} 🌙 {:else} ☀️ {/if}
+			</button>
+		</div>
 		<div class="flex gap-2">
 			<button
-				onclick={() => addNode('http')}
+				onclick={() => handleAddNode('http')}
 				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 			>
 				+ Add HTTP Node
 			</button>
 			<button
-				onclick={() => addNode('code')}
+				onclick={() => handleAddNode('code')}
 				class="bg-card border border-border text-foreground px-4 py-2 rounded hover:bg-accent font-medium text-sm transition-colors"
 			>
 				+ Add Code Node
@@ -541,23 +437,21 @@
 			>
 				Save
 			</button>
-            <button
-            	onclick={runFlow}
-                class="bg-primary text-primary-foreground px-4 py-2 rounded-md hover:opacity-90 font-medium text-sm transition-colors"
-            >
-                Run Flow
-            </button>
-			<!-- Icon toggle for fun -->
+			<button
+				onclick={runFlow}
+				class="bg-primary text-primary-foreground px-4 py-2 rounded-md hover:opacity-90 font-medium text-sm transition-colors"
+			>
+				Run Flow
+			</button>
+			<!-- Icon toggle -->
 			<button
 				onclick={toggleTheme}
 				class="p-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors border border-border bg-background text-foreground"
 				title="Toggle Theme"
 			>
 				{#if isDark}
-					<!-- Moon Icon -->
 					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
 				{:else}
-					<!-- Sun Icon -->
 					<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
 				{/if}
 			</button>
@@ -569,38 +463,38 @@
 
 		<!-- Canvas -->
 		<div class="grow h-full bg-background relative" bind:this={flowWrapper}>
-            <SvelteFlow
-                bind:nodes={nodes}
-                bind:edges={edges}
-                bind:viewport={viewport}
-                nodeTypes={nodeTypes}
-                colorMode={isDark ? 'dark' : 'light'}
-                onnodeclick={onNodeClick}
-                onpaneclick={onPaneClick}
-                fitView
-                class="bg-muted/20"
-            >
+			<SvelteFlow
+				bind:nodes={flowStore.nodes}
+				bind:edges={flowStore.edges}
+				bind:viewport={flowStore.viewport}
+				nodeTypes={nodeTypes}
+				colorMode={isDark ? 'dark' : 'light'}
+				onnodeclick={onNodeClick}
+				onpaneclick={onPaneClick}
+				fitView
+				class="bg-muted/20"
+			>
 				<Background patternColor={isDark ? '#334155' : '#cbd5e1'} gap={20} />
 				<Controls />
 			</SvelteFlow>
 		</div>
 
 		<!-- Node sidebar -->
-		{#if selectedNode}
+		{#if flowStore.selectedNode}
 			<div class="w-96 border-l border-sidebar-border bg-sidebar text-sidebar-foreground flex flex-col shadow-xl z-20 h-full transition-all">
 
 				<!-- Node header -->
 				<div class="px-4 py-2 border-b border-sidebar-border bg-sidebar-accent/50 flex justify-between items-center">
-                    <div class="flex items-center gap-2">
-                        <span class="text-[10px] font-bold uppercase text-muted-foreground tracking-wider">Node ID</span>
-                        <code class="text-xs font-mono bg-background px-1.5 py-0.5 rounded border border-border text-muted-foreground select-all">
-                            {selectedNode.id}
-                        </code>
-                    </div>
-                    <button onclick={() => selectedNodeId = null} class="text-muted-foreground hover:text-foreground">
-                        ×
-                    </button>
-                </div>
+					<div class="flex items-center gap-2">
+						<span class="text-[10px] font-bold uppercase text-muted-foreground tracking-wider">Node ID</span>
+						<code class="text-xs font-mono bg-background px-1.5 py-0.5 rounded border border-border text-muted-foreground select-all">
+							{flowStore.selectedNode.id}
+						</code>
+					</div>
+					<button onclick={() => flowStore.selectNode(null)} class="text-muted-foreground hover:text-foreground">
+						×
+					</button>
+				</div>
 
 				<!-- Sidebar tabs -->
 				<div class="flex border-b border-sidebar-border p-2 gap-1 bg-sidebar">
@@ -648,7 +542,7 @@
 					<!-- Config view -->
 					{#if activeTab === 'config'}
 
-						{#if selectedNode.type === 'http-request'}
+						{#if flowStore.selectedNode.type === 'http-request'}
 							<!-- HTTP form -->
 							<div class="flex flex-col gap-2">
 								<label for="url" class="text-xs font-bold uppercase text-muted-foreground tracking-wider">
@@ -657,8 +551,8 @@
 								<input
 									id="url"
 									type="text"
-									value={selectedNode.data.url}
-									oninput={(e) => updateNodeData('url', e.currentTarget.value)}
+									value={flowStore.selectedNode.data.url}
+									oninput={(e) => flowStore.updateNodeData('url', e.currentTarget.value)}
 									class="border border-input bg-background p-2.5 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-shadow font-mono text-foreground"
 									placeholder="https://api.example.com"
 								/>
@@ -670,8 +564,8 @@
 								</label>
 								<select
 									id="method"
-									value={selectedNode.data.method}
-									onchange={(e) => updateNodeData('method', e.currentTarget.value)}
+									value={flowStore.selectedNode.data.method}
+									onchange={(e) => flowStore.updateNodeData('method', e.currentTarget.value)}
 									class="w-full border border-input bg-background p-2 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-all text-foreground"
 								>
 									<option value="GET">GET</option>
@@ -690,7 +584,6 @@
 									</span>
 									<button
 										onclick={() => {
-											// Logic to add a temporary unique key
 											const key = `New-Header-${Math.floor(Math.random() * 100)}`;
 											updateHeaderValue(key, '');
 										}}
@@ -700,9 +593,9 @@
 									</button>
 								</div>
 
-								{#if selectedNode.data.headers && Object.keys(selectedNode.data.headers).length > 0}
+								{#if flowStore.selectedNode.data.headers && Object.keys(flowStore.selectedNode.data.headers).length > 0}
 									<div class="flex flex-col gap-2 border border-sidebar-border rounded p-2 bg-sidebar-accent">
-										{#each Object.entries(selectedNode.data.headers) as [key, value]}
+										{#each Object.entries(flowStore.selectedNode.data.headers) as [key, value]}
 											<div class="flex gap-1 items-center">
 												<input
 													type="text"
@@ -746,24 +639,24 @@
 								</div>
 								<textarea
 									id="body"
-									value={typeof selectedNode.data.body === 'string'
-										? selectedNode.data.body
-										: (selectedNode.data.body ? JSON.stringify(selectedNode.data.body, null, 2) : '')}
-									oninput={(e) => updateNodeData('body', e.currentTarget.value)}
+									value={typeof flowStore.selectedNode.data.body === 'string'
+										? flowStore.selectedNode.data.body
+										: (flowStore.selectedNode.data.body ? JSON.stringify(flowStore.selectedNode.data.body, null, 2) : '')}
+									oninput={(e) => flowStore.updateNodeData('body', e.currentTarget.value)}
 									class="border border-slate-300 p-2 rounded-md text-xs font-mono grow min-h-[150px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
 									placeholder={'{"key": "{{node_1.body.value}}", "secret": "{{$env.API_KEY}}"}'}
 								></textarea>
 							</div>
 						{/if}
 
-						{#if selectedNode.type === 'code-execution'}
+						{#if flowStore.selectedNode.type === 'code-execution'}
 							<!-- Code node editor -->
 							<div class="flex flex-col gap-2 h-64">
 								<label for="code" class="text-xs font-bold uppercase text-slate-500 tracking-wider">JavaScript Code</label>
 								<textarea
 									id="code"
-									value={selectedNode.data.code}
-									oninput={(e) => updateNodeData('code', e.currentTarget.value)}
+									value={flowStore.selectedNode.data.code}
+									oninput={(e) => flowStore.updateNodeData('code', e.currentTarget.value)}
 									class="border border-slate-300 bg-slate-900 text-green-400 p-3 rounded-md text-xs font-mono grow focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all"
 									placeholder={'return { value: 123 };'}
 									spellcheck="false"
@@ -778,8 +671,8 @@
 								<label for="inputs" class="text-xs font-bold uppercase text-slate-500 tracking-wider">Input Mapping (JSON)</label>
 								<textarea
 									id="inputs"
-									value={typeof selectedNode.data.inputs === 'string' ? selectedNode.data.inputs : JSON.stringify(selectedNode.data.inputs, null, 2)}
-									oninput={(e) => updateNodeData('inputs', e.currentTarget.value)}
+									value={typeof flowStore.selectedNode.data.inputs === 'string' ? flowStore.selectedNode.data.inputs : JSON.stringify(flowStore.selectedNode.data.inputs, null, 2)}
+									oninput={(e) => flowStore.updateNodeData('inputs', e.currentTarget.value)}
 									class="border border-slate-300 p-2 rounded-md text-xs font-mono h-24 focus:outline-none focus:ring-2 focus:ring-purple-500"
 									placeholder={'{"arg1": "{{node_1.body.value}}"}'}
 								></textarea>
@@ -852,20 +745,20 @@
 								<h3 class="text-xs font-bold uppercase text-slate-500 tracking-wider">
 									Last Execution
 								</h3>
-								{#if selectedNode.data.status}
+								{#if flowStore.selectedNode.data.status}
 									<span class={
 										`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide
-										${selectedNode.data.status === 'success' ? 'bg-green-100 text-green-700' : ''}
-										${selectedNode.data.status === 'error' ? 'bg-red-100 text-red-700' : ''}
-										${selectedNode.data.status === 'running' ? 'bg-blue-100 text-blue-700' : ''}
+										${flowStore.selectedNode.data.status === 'success' ? 'bg-green-100 text-green-700' : ''}
+										${flowStore.selectedNode.data.status === 'error' ? 'bg-red-100 text-red-700' : ''}
+										${flowStore.selectedNode.data.status === 'running' ? 'bg-blue-100 text-blue-700' : ''}
 									`}>
-										{selectedNode.data.status}
+										{flowStore.selectedNode.data.status}
 									</span>
 								{/if}
 							</div>
 
-							{#if selectedNode.data.result}
-								<pre class="bg-slate-950 text-slate-50 dark:bg-black dark:text-green-400 p-3 rounded-md text-xs font-mono overflow-x-auto shadow-inner custom-scrollbar">{JSON.stringify(selectedNode.data.result, null, 2)}</pre>
+							{#if flowStore.selectedNode.data.result}
+								<pre class="bg-slate-950 text-slate-50 dark:bg-black dark:text-green-400 p-3 rounded-md text-xs font-mono overflow-x-auto shadow-inner custom-scrollbar">{JSON.stringify(flowStore.selectedNode.data.result, null, 2)}</pre>
 							{:else}
 								<div class="p-8 border border-dashed border-slate-200 rounded-md text-center flex flex-col items-center gap-2">
 									<span class="text-2xl">🧪</span>
@@ -879,7 +772,7 @@
 				<!-- Sticky footer -->
 				<div class="p-4 border-t border-sidebar-border bg-sidebar-accent text-center">
 					<div class="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-						{#if selectedNode.data.status === 'running'}
+						{#if flowStore.selectedNode.data.status === 'running'}
 							<span class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
 							Running...
 						{:else}
