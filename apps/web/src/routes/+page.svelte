@@ -10,16 +10,16 @@
 
 	// Shared app + worker types so the UI matches the backend shapes.
 	import type { AppNode } from '$lib/types/app';
-	import type { ExecutionResult } from '$lib/types/worker';
 
 	// Stores
 	import { flowStore } from '$lib/stores/flowStore.svelte';
 	import { themeStore } from '$lib/stores/themeStore.svelte';
-	import { secretsStore } from '$lib/stores/secretsStore.svelte'; // still need for load() in onMount
+	import { secretsStore } from '$lib/stores/secretsStore.svelte';
 
 	// Services
-	import { runFlow, handleExecutionResult } from '$lib/services/executionService';
+	import { runFlow } from '$lib/services/executionService';
 	import { saveFlow, loadLatestFlow } from '$lib/services/flowPersistence';
+	import { sseService } from '$lib/services/sseService';
 
 	// Custom node components rendered inside SvelteFlow.
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -39,6 +39,7 @@
 	// Local UI state
 	let flowWrapper: HTMLDivElement | null = null;
 	let activeTab = $state<'config' | 'secrets' | 'test'>('config');
+	let sseConnected = $state(false);
 
 	// Clicking a node should focus the config tab for quick edits.
 	const onNodeClick = ({ node }: { node: AppNode }) => {
@@ -61,16 +62,13 @@
 		loadLatestFlow();
 		secretsStore.load();
 
-		// SSE: Stream node results from the Rust worker
-		const eventSource = new EventSource('/api/stream');
+		// SSE: Connect with auto-reconnect
+		sseService.setConnectionCallback((connected) => {
+			sseConnected = connected;
+		});
+		sseService.connect();
 
-		eventSource.onmessage = (event) => {
-			const result: ExecutionResult = JSON.parse(event.data);
-			const isSuccess = result.status_code >= 200 && result.status_code < 300;
-			handleExecutionResult(result.node_id, isSuccess, result.body);
-		};
-
-		return () => eventSource.close();
+		return () => sseService.disconnect();
 	});
 
 	// =================================================
@@ -113,6 +111,11 @@
 	<div class="px-6 py-3 border-b border-border flex justify-between items-center bg-card z-10 shadow-xs">
 		<div class="flex items-center gap-4">
 			<h1 class="font-bold text-xl tracking-tight">SwiftGrid</h1>
+			<!-- Connection status -->
+			<div class="flex items-center gap-1.5 text-xs text-muted-foreground" title={sseConnected ? 'Connected to worker' : 'Disconnected'}>
+				<span class={`w-2 h-2 rounded-full ${sseConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`}></span>
+				{sseConnected ? 'Live' : 'Offline'}
+			</div>
 			<!-- Quick theme toggle -->
 			<button
 				onclick={themeStore.toggle}

@@ -1,54 +1,80 @@
 import Redis from 'ioredis';
 import { env } from '$env/dynamic/private';
 
+const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30s
+const REDIS_BLOCK_MS = 10000; // Block for 10s waiting for data
+
 export function GET() {
     const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
     const streamKey = 'swiftgrid_results';
 
     let active = true;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     const stream = new ReadableStream({
         async start(controller) {
-            console.log("Client connected to SSE stream");
+            console.log('SSE: Client connected');
 
-            // We use the '$' ID to listen only for NEW messages arriving after connection
+            // Heartbeat keeps the connection alive through proxies/load balancers
+            heartbeatTimer = setInterval(() => {
+                if (active) {
+                    try {
+                        controller.enqueue(': heartbeat\n\n');
+                    } catch {
+                        // Controller closed, stop heartbeat
+                        if (heartbeatTimer) clearInterval(heartbeatTimer);
+                    }
+                }
+            }, HEARTBEAT_INTERVAL_MS);
+
+            // Listen for new messages only ($ = latest)
             let lastId = '$';
+            let errorCount = 0;
+            const MAX_ERRORS = 5;
 
             while (active) {
                 try {
-                    // BLOCK for 10 seconds waiting for data
-                    // XREAD BLOCK 10000 STREAMS swiftgrid_results $
-                    const result = await redis.xread('BLOCK', 10000, 'STREAMS', streamKey, lastId);
+                    const result = await redis.xread('BLOCK', REDIS_BLOCK_MS, 'STREAMS', streamKey, lastId);
 
                     if (result) {
-                        const [key, messages] = result[0]; // stream_key, array of messages
+                        const [, messages] = result[0];
                         
                         for (const message of messages) {
                             const [id, fields] = message;
-                            lastId = id; // Update cursor
+                            lastId = id;
                             
-                            // Redis returns fields as [key, value, key, value]
-                            // We know we stored it as "payload"
                             const payloadIndex = fields.indexOf('payload');
                             if (payloadIndex !== -1) {
                                 const jsonString = fields[payloadIndex + 1];
-                                
-                                // Send to Browser
-                                // SSE Format: "data: <content>\n\n"
-                                const sseMessage = `data: ${jsonString}\n\n`;
-                                controller.enqueue(sseMessage);
+                                controller.enqueue(`data: ${jsonString}\n\n`);
                             }
                         }
                     }
+
+                    // Reset error count on success
+                    errorCount = 0;
                 } catch (err) {
-                    console.error("Redis Stream Error:", err);
-                    // If connection lost, maybe retry or exit
+                    errorCount++;
+                    console.error(`SSE: Redis error (${errorCount}/${MAX_ERRORS}):`, err);
+
+                    // Break out if too many consecutive errors
+                    if (errorCount >= MAX_ERRORS) {
+                        console.error('SSE: Too many errors, closing stream');
+                        active = false;
+                        break;
+                    }
+
+                    // Brief pause before retry
+                    await new Promise(r => setTimeout(r, 1000));
                 }
             }
+
+            controller.close();
         },
         cancel() {
-            console.log("Client disconnected");
+            console.log('SSE: Client disconnected');
             active = false;
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
             redis.disconnect();
         }
     });
