@@ -2,9 +2,11 @@ use redis::{AsyncCommands, RedisResult, streams::{StreamReadOptions, StreamReadR
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc; // Channels
-use tokio::sync::oneshot; // One-way response channel
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use typeshare::typeshare;
 use rquickjs::{AsyncContext, AsyncRuntime, Value};
 
@@ -116,103 +118,146 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     });
 
-    // Redis streams for jobs + receipts.
-    let stream_key = "swiftgrid_stream";
-    let result_stream_key = "swiftgrid_results";
+    // Redis streams for jobs + receipts (must match @swiftgrid/shared)
+    const STREAM_JOBS: &str = "swiftgrid_stream";
+    const STREAM_RESULTS: &str = "swiftgrid_results";
     let group_name = "workers_group";
-    let consumer_name = "worker_1";
-    let _: RedisResult<()> = con.xgroup_create_mkstream(stream_key, group_name, "$").await;
+    
+    // Unique consumer name: worker_<random_id> (allows multiple workers)
+    let consumer_name = format!("worker_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let _: RedisResult<()> = con.xgroup_create_mkstream(STREAM_JOBS, group_name, "$").await;
 
-    println!("Listening for jobs...");
+    println!("Worker '{}' listening for jobs... (Ctrl+C to stop)", consumer_name);
+
+    // Track in-flight jobs for graceful shutdown
+    let in_flight = Arc::new(AtomicUsize::new(0));
 
     loop {
-        // Blocking read so we only wake when a job arrives.
-        let opts = StreamReadOptions::default().group(group_name, consumer_name).count(1).block(0);
-        let result: StreamReadReply = con.xread_options(&[stream_key], &[">"], &opts).await?;
-
-        for stream_key_result in result.keys {
-            for message in stream_key_result.ids {
-                let msg_id = message.id.clone();
-                
-                if let Some(payload_str) = message.map.get("payload") {
-                    let payload_string: String = redis::from_redis_value(payload_str)?;
-                    
-                    match serde_json::from_str::<WorkerJob>(&payload_string) {
-                        Ok(job) => {
-                            println!("Processing Node: {} [{:?}]", job.id, job.node);
-
-                            let h_client = http_client.clone();
-                            let mut r_con = client.get_multiplexed_async_connection().await?;
-                            let job_id = job.id.clone();
-                            
-                            // Clone the channel sender so we can pass it to the task
-                            let j_sender = js_sender.clone();
-
-                            tokio::spawn(async move {
-                                // Execute node based on type.
-                                let (status, body) = match job.node {
-                                    NodeType::Http(data) => {
-                                        execute_http(h_client, data).await
-                                    }
-                                    NodeType::Code(data) => {
-                                        // Send to JS thread and wait for answer.
-                                        let (tx, rx) = oneshot::channel();
-                                        
-                                        let task = JsTask {
-                                            code: data.code,
-                                            inputs: data.inputs,
-                                            responder: tx
-                                        };
-
-                                        if j_sender.send(task).await.is_err() {
-                                            (500, Some(serde_json::json!({"error": "JS Engine crashed"})))
-                                        } else {
-                                            match rx.await {
-                                                Ok(Ok(val)) => (200, Some(val)),
-                                                Ok(Err(e)) => (400, Some(serde_json::json!({"error": e}))),
-                                                Err(_) => (500, Some(serde_json::json!({"error": "JS Timeout"})))
-                                            }
+        // Check for shutdown signal (non-blocking)
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nShutdown signal received, stopping...");
+                break;
+            }
+            result = async {
+                // Block for 1 second at a time so we can check shutdown periodically
+                let opts = StreamReadOptions::default()
+                    .group(group_name, &consumer_name)
+                    .count(1)
+                    .block(1000); // 1 second timeout
+                con.xread_options::<&str, &str, StreamReadReply>(&[STREAM_JOBS], &[">"], &opts).await
+            } => {
+                match result {
+                    Ok(reply) => {
+                        for stream_key_result in reply.keys {
+                            for message in stream_key_result.ids {
+                                let msg_id = message.id.clone();
+                                
+                                if let Some(payload_str) = message.map.get("payload") {
+                                    let payload_string: String = match redis::from_redis_value(payload_str) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            eprintln!("Failed to parse payload: {}", e);
+                                            continue;
                                         }
-                                    }
-                                };
+                                    };
+                                    
+                                    match serde_json::from_str::<WorkerJob>(&payload_string) {
+                                        Ok(job) => {
+                                            println!("Processing Node: {} [{:?}]", job.id, job.node);
 
-                                // SEND RECEIPT
-                                let receipt = ExecutionResult {
-                                    node_id: job_id.clone(),
-                                    status_code: status,
-                                    body,
-                                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-                                };
+                                            let h_client = http_client.clone();
+                                            let mut r_con = match client.get_multiplexed_async_connection().await {
+                                                Ok(c) => c,
+                                                Err(e) => {
+                                                    eprintln!("Failed to get Redis connection: {}", e);
+                                                    continue;
+                                                }
+                                            };
+                                            let job_id = job.id.clone();
+                                            let j_sender = js_sender.clone();
+                                            let in_flight_clone = Arc::clone(&in_flight);
 
-                                match serde_json::to_string(&receipt) {
-                                    Ok(receipt_json) => {
-                                        let res: RedisResult<String> = r_con.xadd(result_stream_key, "*", &[("payload", receipt_json)]).await;
-                                        if let Err(e) = res {
-                                            eprintln!("failed to publish execution result for {}: {}", job_id, e);
+                                            // Increment in-flight counter
+                                            in_flight.fetch_add(1, Ordering::SeqCst);
+
+                                            tokio::spawn(async move {
+                                                let (status, body) = match job.node {
+                                                    NodeType::Http(data) => {
+                                                        execute_http(h_client, data).await
+                                                    }
+                                                    NodeType::Code(data) => {
+                                                        let (tx, rx) = oneshot::channel();
+                                                        
+                                                        let task = JsTask {
+                                                            code: data.code,
+                                                            inputs: data.inputs,
+                                                            responder: tx
+                                                        };
+
+                                                        if j_sender.send(task).await.is_err() {
+                                                            (500, Some(serde_json::json!({"error": "JS Engine crashed"})))
+                                                        } else {
+                                                            match rx.await {
+                                                                Ok(Ok(val)) => (200, Some(val)),
+                                                                Ok(Err(e)) => (400, Some(serde_json::json!({"error": e}))),
+                                                                Err(_) => (500, Some(serde_json::json!({"error": "JS Timeout"})))
+                                                            }
+                                                        }
+                                                    }
+                                                };
+
+                                                let receipt = ExecutionResult {
+                                                    node_id: job_id.clone(),
+                                                    status_code: status,
+                                                    body,
+                                                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+                                                };
+
+                                                match serde_json::to_string(&receipt) {
+                                                    Ok(receipt_json) => {
+                                                        let res: RedisResult<String> = r_con.xadd(STREAM_RESULTS, "*", &[("payload", receipt_json)]).await;
+                                                        if let Err(e) = res {
+                                                            eprintln!("Failed to publish result for {}: {}", job_id, e);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("Failed to serialize result for {}: {}", job_id, e);
+                                                    }
+                                                }
+
+                                                let _: RedisResult<()> = r_con.xack(STREAM_JOBS, group_name, &[&msg_id]).await;
+                                                let _: RedisResult<()> = r_con.xdel(STREAM_JOBS, &[&msg_id]).await;
+
+                                                // Decrement in-flight counter
+                                                in_flight_clone.fetch_sub(1, Ordering::SeqCst);
+                                            });
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("critical: failed to serialize execution result for {}: {}", job_id, e);
+                                        Err(e) => eprintln!("Failed to parse WorkerJob: {}", e),
                                     }
                                 }
-
-                                let ack_res: RedisResult<()> = r_con.xack(stream_key, group_name, &[&msg_id]).await;
-                                if let Err(e) = ack_res {
-                                    eprintln!("failed to acknowledge redis message {}: {}", msg_id, e);
-                                }
-
-                                let del_res: RedisResult<()> = r_con.xdel(stream_key, &[&msg_id]).await;
-                                if let Err(e) = del_res {
-                                    eprintln!("failed to delete redis message {}: {}", msg_id, e);
-                                }
-                            });
+                            }
                         }
-                        Err(e) => eprintln!("Failed to parse WorkerJob: {}", e),
+                    }
+                    Err(e) => {
+                        eprintln!("Redis error: {}", e);
                     }
                 }
             }
         }
     }
+
+    // Wait for in-flight jobs to complete
+    let pending = in_flight.load(Ordering::SeqCst);
+    if pending > 0 {
+        println!("Waiting for {} in-flight job(s) to complete...", pending);
+        while in_flight.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    println!("Worker '{}' shut down gracefully.", consumer_name);
+    Ok(())
 }
 
 // Basic HTTP executor so the worker can stay lean.
