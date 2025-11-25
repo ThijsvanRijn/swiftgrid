@@ -2,10 +2,11 @@ import { json } from '@sveltejs/kit';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
 import { secrets } from '$lib/server/db/schema';
-import type { WorkerJob } from '$lib/types/worker'; 
+import type { WorkerJob } from '$lib/types/worker';
+import { env } from '$env/dynamic/private';
 
-// Connect to Redis
-const redis = new Redis("redis://127.0.0.1:6379");
+// Connect to Redis (env var or fallback to localhost)
+const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
 
 /**
  * THE INJECTOR

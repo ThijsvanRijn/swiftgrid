@@ -82,7 +82,9 @@ struct JsTask {
 async fn main() -> Result<(), Box<dyn Error>> {
     println!("SwiftGrid Worker initializing...");
 
-    let client = redis::Client::open("redis://127.0.0.1/")?;
+    // Read Redis URL from env, fallback to localhost
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+    let client = redis::Client::open(redis_url)?;
     let mut con = client.get_multiplexed_async_connection().await?;
     
     static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));

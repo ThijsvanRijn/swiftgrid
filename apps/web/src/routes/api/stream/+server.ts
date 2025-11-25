@@ -1,7 +1,8 @@
 import Redis from 'ioredis';
+import { env } from '$env/dynamic/private';
 
 export function GET() {
-    const redis = new Redis("redis://127.0.0.1:6379");
+    const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
     const streamKey = 'swiftgrid_results';
 
     let active = true;
