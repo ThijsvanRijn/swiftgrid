@@ -1,5 +1,9 @@
 import type { Edge, Viewport } from '@xyflow/svelte';
 import type { AppNode, AppNodeData } from '$lib/types/app';
+import { autoSaveService } from '$lib/services/autoSaveService.svelte';
+
+// Initialize auto-save with a lazy getter to avoid circular imports
+autoSaveService.init(() => flowStore);
 
 // Flow state - the core of the canvas
 let nodes = $state.raw<AppNode[]>([
@@ -38,6 +42,8 @@ function updateNodeData(key: keyof AppNodeData, value: any) {
 		}
 		return n;
 	});
+
+	autoSaveService.triggerSave();
 }
 
 // Updates node status + optional result data
@@ -82,6 +88,7 @@ function addNode(type: 'http' | 'code', position?: { x: number; y: number }) {
 	};
 
 	nodes = [...nodes, newNode];
+	autoSaveService.triggerSave();
 }
 
 // Select a node by ID
@@ -109,10 +116,16 @@ export const flowStore = {
 	get selectedNodeId() { return selectedNodeId; },
 	get selectedNode() { return selectedNode; },
 
-	// Setters for binding
-	set nodes(v: AppNode[]) { nodes = v; },
-	set edges(v: Edge[]) { edges = v; },
-	set viewport(v: Viewport) { viewport = v; },
+	// Setters for binding (trigger auto-save on structural changes)
+	set nodes(v: AppNode[]) { 
+		nodes = v; 
+		autoSaveService.triggerSave();
+	},
+	set edges(v: Edge[]) { 
+		edges = v; 
+		autoSaveService.triggerSave();
+	},
+	set viewport(v: Viewport) { viewport = v; }, // Don't save viewport changes
 
 	// Actions
 	updateNodeData,

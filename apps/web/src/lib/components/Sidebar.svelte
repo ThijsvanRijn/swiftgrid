@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { flowStore } from '$lib/stores/flowStore.svelte';
+	import { autoSaveService } from '$lib/services/autoSaveService.svelte';
 	import ConfigPanel from './sidebar/ConfigPanel.svelte';
 	import SecretsPanel from './sidebar/SecretsPanel.svelte';
 	import ResultsPanel from './sidebar/ResultsPanel.svelte';
@@ -90,9 +91,18 @@
 				{#if flowStore.selectedNode.data.status === 'running'}
 					<span class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
 					Running...
-				{:else}
+				{:else if autoSaveService.status === 'saving'}
+					<span class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></span>
+					Saving...
+				{:else if autoSaveService.status === 'saved'}
 					<span class="w-2 h-2 rounded-full bg-green-500"></span>
-					Auto-saved
+					Saved
+				{:else if autoSaveService.status === 'error'}
+					<span class="w-2 h-2 rounded-full bg-red-500"></span>
+					Save failed
+				{:else}
+					<span class="w-2 h-2 rounded-full bg-slate-400"></span>
+					Idle
 				{/if}
 			</div>
 		</div>

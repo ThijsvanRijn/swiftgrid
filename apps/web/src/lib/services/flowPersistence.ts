@@ -1,27 +1,9 @@
 import { flowStore } from '$lib/stores/flowStore.svelte';
+import { autoSaveService } from './autoSaveService.svelte';
 
-// Save current flow to the database
+// Manual save (uses auto-save service for immediate save)
 export async function saveFlow() {
-	try {
-		const response = await fetch('/api/flows', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ nodes: flowStore.nodes, edges: flowStore.edges })
-		});
-
-		if (response.ok) {
-			// Visual feedback (could be a toast later)
-			const btn = document.getElementById('saveBtn');
-			if (btn) {
-				const originalText = btn.innerText;
-				btn.innerText = 'Saved!';
-				setTimeout(() => (btn.innerText = originalText), 2000);
-			}
-		}
-	} catch (e) {
-		console.error('Save failed', e);
-		alert('Failed to save flow to DB');
-	}
+	await autoSaveService.saveNow();
 }
 
 // Load the latest flow from the database
@@ -35,6 +17,9 @@ export async function loadLatestFlow() {
 			flowStore.setFlow(graph.nodes || [], graph.edges || []);
 			console.log('Flow loaded from DB!');
 		}
+
+		// Mark current state as saved (so we don't immediately re-save)
+		autoSaveService.markAsSaved();
 	} catch (e) {
 		console.error('Load failed', e);
 	}
