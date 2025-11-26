@@ -173,7 +173,9 @@ export async function runFromNode(nodeId: string) {
 		edges: flowStore.edges.map(e => ({
 			id: e.id,
 			source: e.source,
-			target: e.target
+			sourceHandle: e.sourceHandle,  // Important for Router node routing
+			target: e.target,
+			targetHandle: e.targetHandle
 		}))
 	};
 	
@@ -256,7 +258,9 @@ export async function runFlow() {
 		edges: flowStore.edges.map(e => ({
 			id: e.id,
 			source: e.source,
-			target: e.target
+			sourceHandle: e.sourceHandle,  // Important for Router node routing
+			target: e.target,
+			targetHandle: e.targetHandle
 		}))
 	};
 	
