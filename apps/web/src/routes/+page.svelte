@@ -18,16 +18,18 @@
 
 	// Services
 	import { runFlow } from '$lib/services/executionService';
-	import { saveFlow, loadLatestFlow } from '$lib/services/flowPersistence';
+	import { saveFlow, loadLatestFlow, setFitViewCallback } from '$lib/services/flowPersistence';
 	import { sseService } from '$lib/services/sseService';
 
 	// Layout components
 	import Navbar from '$lib/components/Navbar.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
+	import CanvasToolbar from '$lib/components/CanvasToolbar.svelte';
 
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
 	import CodeExecutionNodeComponent from '$lib/components/nodes/CodeExecutionNode.svelte';
+	import FlowInit from '$lib/components/FlowInit.svelte';
 
 	const nodeTypes = {
 		'http-request': HttpRequestNodeComponent,
@@ -101,34 +103,46 @@
 	}
 </script>
 
-<div class="h-screen w-full flex flex-col text-foreground font-sans bg-background">
-	<Navbar
-		{sseStatus}
-		onAddHttpNode={() => handleAddNode('http')}
-		onAddCodeNode={() => handleAddNode('code')}
-		onSave={saveFlow}
-		onRun={runFlow}
-	/>
+<div class="h-screen w-full flex flex-col text-foreground font-sans bg-canvas">
+	<!-- Flow canvas as base layer -->
+	<div class="absolute inset-0" bind:this={flowWrapper}>
+		<SvelteFlow
+			bind:nodes={flowStore.nodes}
+			bind:edges={flowStore.edges}
+			bind:viewport={flowStore.viewport}
+			nodeTypes={nodeTypes}
+			colorMode={themeStore.isDark ? 'dark' : 'light'}
+			onnodeclick={onNodeClick}
+			onpaneclick={onPaneClick}
+			class="bg-canvas"
+		>
+			<FlowInit />
+			<Background patternColor="var(--pattern-dots)" gap={16} size={1.5} />
+			<Controls class="bg-panel! border-panel-border! rounded-none! shadow-float! m-3!" />
+		</SvelteFlow>
+	</div>
 
-	<div class="grow flex overflow-hidden relative">
-		<!-- Canvas -->
-		<div class="grow h-full bg-background relative" bind:this={flowWrapper}>
-			<SvelteFlow
-				bind:nodes={flowStore.nodes}
-				bind:edges={flowStore.edges}
-				bind:viewport={flowStore.viewport}
-				nodeTypes={nodeTypes}
-				colorMode={themeStore.isDark ? 'dark' : 'light'}
-				onnodeclick={onNodeClick}
-				onpaneclick={onPaneClick}
-				fitView
-				class="bg-muted/20"
-			>
-				<Background patternColor={themeStore.isDark ? '#334155' : '#cbd5e1'} gap={20} />
-				<Controls />
-			</SvelteFlow>
+	<!-- Floating UI layer -->
+	<div class="absolute inset-0 pointer-events-none p-3 flex flex-col gap-3">
+		<!-- Top navbar -->
+		<Navbar
+			{sseStatus}
+			onAddHttpNode={() => handleAddNode('http')}
+			onAddCodeNode={() => handleAddNode('code')}
+			onSave={saveFlow}
+			onRun={runFlow}
+		/>
+
+		<!-- Main content area with toolbar and sidebar -->
+		<div class="grow flex gap-3 overflow-hidden">
+			<!-- Left: Canvas toolbar -->
+			<CanvasToolbar />
+			
+			<!-- Spacer to push sidebar right -->
+			<div class="grow"></div>
+			
+			<!-- Right: Floating sidebar -->
+			<Sidebar />
 		</div>
-
-		<Sidebar />
 	</div>
 </div>

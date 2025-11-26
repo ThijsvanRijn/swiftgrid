@@ -1,5 +1,12 @@
-// Theme state
-let isDark = $state(false);
+// Sync initial state with what the inline script in app.html already set
+// This prevents the flash where isDark starts false but the DOM already has .dark
+function getInitialDark(): boolean {
+	if (typeof document === 'undefined') return false;
+	return document.documentElement.classList.contains('dark');
+}
+
+// Theme state - initialize from DOM to match inline script
+let isDark = $state(getInitialDark());
 
 // Toggle between light and dark
 function toggle() {
@@ -21,6 +28,7 @@ function apply() {
 
 // Load theme from localStorage or OS preference (call in onMount)
 function init() {
+	// Re-sync in case SSR rendered differently
 	const stored = localStorage.getItem('theme');
 	if (stored) {
 		isDark = stored === 'dark';

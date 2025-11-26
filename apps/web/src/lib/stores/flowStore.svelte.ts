@@ -102,9 +102,12 @@ function getNode(id: string) {
 }
 
 // Replace entire flow state (used when loading from DB)
-function setFlow(newNodes: AppNode[], newEdges: Edge[]) {
+function setFlow(newNodes: AppNode[], newEdges: Edge[], newViewport?: Viewport) {
 	nodes = newNodes;
 	edges = newEdges;
+	if (newViewport) {
+		viewport = newViewport;
+	}
 }
 
 // Export as a single store object
@@ -125,7 +128,10 @@ export const flowStore = {
 		edges = v; 
 		autoSaveService.triggerSave();
 	},
-	set viewport(v: Viewport) { viewport = v; }, // Don't save viewport changes
+	set viewport(v: Viewport) { 
+		viewport = v; 
+		autoSaveService.triggerSave(); // Save viewport changes
+	},
 
 	// Actions
 	updateNodeData,

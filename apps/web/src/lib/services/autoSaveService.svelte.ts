@@ -32,7 +32,8 @@ function hashFlow(): string {
                 inputs: n.data.inputs
             }
         })),
-        edges: flowStore.edges
+        edges: flowStore.edges,
+        viewport: flowStore.viewport
     });
 }
 
@@ -54,7 +55,11 @@ async function performSave() {
         const response = await fetch('/api/flows', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nodes: flowStore.nodes, edges: flowStore.edges })
+            body: JSON.stringify({ 
+                nodes: flowStore.nodes, 
+                edges: flowStore.edges,
+                viewport: flowStore.viewport
+            })
         });
 
         if (response.ok) {

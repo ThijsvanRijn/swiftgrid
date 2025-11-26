@@ -6,6 +6,13 @@ export async function saveFlow() {
 	await autoSaveService.saveNow();
 }
 
+// Callback for when we need fitView (no saved viewport)
+let onNeedFitView: (() => void) | null = null;
+
+export function setFitViewCallback(callback: () => void) {
+	onNeedFitView = callback;
+}
+
 // Load the latest flow from the database
 export async function loadLatestFlow() {
 	try {
@@ -14,8 +21,16 @@ export async function loadLatestFlow() {
 
 		if (data.graph) {
 			const graph = data.graph as any;
-			flowStore.setFlow(graph.nodes || [], graph.edges || []);
+			const hasViewport = graph.viewport && (graph.viewport.x !== 0 || graph.viewport.y !== 0 || graph.viewport.zoom !== 1);
+			
+			flowStore.setFlow(graph.nodes || [], graph.edges || [], graph.viewport);
 			console.log('Flow loaded from DB!');
+			
+			// If no meaningful viewport was saved, trigger fitView
+			if (!hasViewport && onNeedFitView) {
+				// Small delay to let SvelteFlow render the nodes first
+				setTimeout(() => onNeedFitView?.(), 50);
+			}
 		}
 
 		// Mark current state as saved (so we don't immediately re-save)
