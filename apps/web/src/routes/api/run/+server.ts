@@ -267,10 +267,11 @@ function buildJobFromNode(
             id: node.id,
             run_id: runId,
             node: {
-                type: 'WEBHOOK_WAIT',
+                type: 'WEBHOOKWAIT',
                 data: {
-                    description: node.data.webhookDescription || 'Wait for webhook',
-                    timeout_ms: node.data.webhookTimeoutMs || (7 * 24 * 60 * 60 * 1000)
+                    timeout_ms: node.data.timeoutMs || (7 * 24 * 60 * 60 * 1000),
+                    timeout_str: node.data.timeoutStr,
+                    description: node.data.description || 'Wait for external event'
                 }
             },
             retry_count: 0,

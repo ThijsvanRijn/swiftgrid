@@ -127,14 +127,26 @@ export async function POST({ request }) {
         return json({ message: 'Dependencies not yet satisfied', scheduledNodes: [] });
     }
     
-    // 4. Fetch secrets and schedule the nodes
+    // 4. Fetch secrets and node outputs for variable interpolation
     const allSecrets = await db.select().from(secrets);
     const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
+    
+    // Build a map of nodeId -> output from completed events
+    // The worker stores the output as "result" in the event payload
+    const nodeOutputs = new Map<string, any>();
+    for (const event of completedEvents) {
+        if (event.nodeId && event.payload && typeof event.payload === 'object') {
+            const payload = event.payload as { result?: any };
+            if (payload.result !== undefined) {
+                nodeOutputs.set(event.nodeId, payload.result);
+            }
+        }
+    }
     
     const scheduledNodeIds: string[] = [];
     
     for (const node of nodesToSchedule) {
-        const job = buildJobFromNode(node, runId, secretMap);
+        const job = buildJobFromNode(node, runId, secretMap, nodeOutputs);
         if (job) {
             // Log NODE_SCHEDULED event
             await db.insert(runEvents).values({
@@ -168,15 +180,42 @@ export async function POST({ request }) {
 function buildJobFromNode(
     node: any, 
     runId: string, 
-    secretMap: Map<string, string>
+    secretMap: Map<string, string>,
+    nodeOutputs: Map<string, any>
 ): object | null {
     const processString = (str: string) => {
         return str.replace(/{{(.*?)}}/g, (match, variablePath) => {
             const cleanPath = variablePath.trim();
+            
+            // Handle environment variables: {{$env.KEY}}
             if (cleanPath.startsWith('$env.')) {
                 const keyName = cleanPath.replace('$env.', '');
                 return secretMap.get(keyName) || match;
             }
+            
+            // Handle node output references: {{nodeId.field}} or {{nodeId.field.nested}}
+            const dotIndex = cleanPath.indexOf('.');
+            if (dotIndex > 0) {
+                const refNodeId = cleanPath.substring(0, dotIndex);
+                const fieldPath = cleanPath.substring(dotIndex + 1);
+                
+                const nodeOutput = nodeOutputs.get(refNodeId);
+                if (nodeOutput !== undefined) {
+                    // Navigate the field path (supports nested: "body.data.id")
+                    const pathParts = fieldPath.split('.');
+                    let value: any = nodeOutput;
+                    for (const part of pathParts) {
+                        if (value && typeof value === 'object' && part in value) {
+                            value = value[part];
+                        } else {
+                            return match; // Path not found, keep original
+                        }
+                    }
+                    // Return stringified value for JSON compatibility
+                    return typeof value === 'string' ? value : JSON.stringify(value);
+                }
+            }
+            
             return match;
         });
     };
@@ -260,10 +299,11 @@ function buildJobFromNode(
             id: node.id,
             run_id: runId,
             node: {
-                type: 'WEBHOOK_WAIT',
+                type: 'WEBHOOKWAIT',
                 data: {
-                    description: node.data.webhookDescription || 'Wait for webhook',
-                    timeout_ms: node.data.webhookTimeoutMs || (7 * 24 * 60 * 60 * 1000)
+                    timeout_ms: node.data.timeoutMs || (7 * 24 * 60 * 60 * 1000),
+                    timeout_str: node.data.timeoutStr,
+                    description: node.data.description || 'Wait for external event'
                 }
             },
             retry_count: 0,

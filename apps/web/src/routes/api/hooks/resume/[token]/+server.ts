@@ -101,7 +101,7 @@ export async function POST({ params, request, getClientAddress }) {
         id: suspension.nodeId,
         run_id: suspension.runId,
         node: {
-            type: 'WEBHOOK_RESUME',
+            type: 'WEBHOOKRESUME',
             data: {
                 resume_token: token,
                 payload: payload
