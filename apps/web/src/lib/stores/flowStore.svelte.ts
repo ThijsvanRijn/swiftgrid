@@ -70,7 +70,7 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 }
 
 // Adds a new node at the given position (or random fallback)
-function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router', position?: { x: number; y: number }) {
+function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm', position?: { x: number; y: number }) {
 	const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
 
 	let newNode: AppNode;
@@ -125,6 +125,24 @@ function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router', po
 				],
 				defaultOutput: 'default',
 				routerMode: 'first_match',
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else if (type === 'llm') {
+		// LLM Chat node with OpenAI defaults
+		newNode = {
+			id: generateId(),
+			type: 'llm',
+			data: {
+				label: 'LLM Chat',
+				baseUrl: 'https://api.openai.com/v1',
+				apiKey: '{{$env.OPENAI_KEY}}',
+				model: 'gpt-4o',
+				systemPrompt: 'You are a helpful assistant.',
+				userPrompt: '',
+				temperature: 1,
+				stream: true,
 				status: 'idle'
 			},
 			position: position ?? fallbackPosition

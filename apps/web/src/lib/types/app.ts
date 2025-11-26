@@ -1,5 +1,5 @@
 import type { Node } from '@xyflow/svelte';
-import type { HttpMethod, RouterCondition } from '@swiftgrid/shared';
+import type { HttpMethod, RouterCondition, LlmMessage } from '@swiftgrid/shared';
 
 // 1. Define the Data Shape
 export type AppNodeData = {
@@ -28,6 +28,17 @@ export type AppNodeData = {
     conditions?: RouterCondition[];     // Conditions to check in order
     defaultOutput?: string;             // Output handle if no conditions match
     routerMode?: 'first_match' | 'broadcast';  // Evaluation mode
+
+    // LLM Node Fields
+    baseUrl?: string;           // API endpoint: "https://api.openai.com/v1"
+    apiKey?: string;            // API key or {{$env.OPENAI_KEY}}
+    model?: string;             // "gpt-4o", "gpt-3.5-turbo", etc.
+    messages?: LlmMessage[];    // Conversation messages
+    systemPrompt?: string;      // System prompt (convenience field)
+    userPrompt?: string;        // User prompt (convenience field, can use {{node.field}})
+    temperature?: number;       // 0.0 - 2.0
+    maxTokens?: number;         // Max response tokens
+    stream?: boolean;           // Enable streaming
 
     // UI State fields (Shared)
     status?: 'idle' | 'running' | 'success' | 'error';

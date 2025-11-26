@@ -41,6 +41,21 @@ export interface HttpNodeData {
 	body?: any;
 }
 
+export interface LlmMessage {
+	role: string;
+	content: string;
+}
+
+export interface LlmNodeData {
+	base_url: string;
+	api_key: string;
+	model: string;
+	messages: LlmMessage[];
+	temperature?: number;
+	max_tokens?: number;
+	stream?: boolean;
+}
+
 export interface RouterCondition {
 	id: string;
 	label: string;
@@ -71,7 +86,8 @@ export type NodeType =
 	| { type: "DELAYRESUME", data: DelayResumeData }
 	| { type: "WEBHOOKWAIT", data: WebhookWaitData }
 	| { type: "WEBHOOKRESUME", data: WebhookResumeData }
-	| { type: "ROUTER", data: RouterNodeData };
+	| { type: "ROUTER", data: RouterNodeData }
+	| { type: "LLM", data: LlmNodeData };
 
 export interface WorkerJob {
 	id: string;

@@ -33,6 +33,7 @@
 	import DelayNodeComponent from '$lib/components/nodes/DelayNode.svelte';
 	import WebhookWaitNodeComponent from '$lib/components/nodes/WebhookWaitNode.svelte';
 	import RouterNodeComponent from '$lib/components/nodes/RouterNode.svelte';
+	import LLMNodeComponent from '$lib/components/nodes/LLMNode.svelte';
 	import FlowInit from '$lib/components/FlowInit.svelte';
 
 	const nodeTypes = {
@@ -40,7 +41,8 @@
 		'code-execution': CodeExecutionNodeComponent,
 		'delay': DelayNodeComponent,
 		'webhook-wait': WebhookWaitNodeComponent,
-		'router': RouterNodeComponent
+		'router': RouterNodeComponent,
+		'llm': LLMNodeComponent
 	};
 
 	// Local UI state
@@ -111,7 +113,7 @@
 		return screenPointToFlowPosition(centerScreenPoint);
 	}
 
-	function handleAddNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router') {
+	function handleAddNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm') {
 		const position = getCanvasCenterPosition() ?? undefined;
 		flowStore.addNode(type, position);
 	}
@@ -146,6 +148,7 @@
 			onAddDelayNode={() => handleAddNode('delay')}
 			onAddWebhookWaitNode={() => handleAddNode('webhook-wait')}
 			onAddRouterNode={() => handleAddNode('router')}
+			onAddLlmNode={() => handleAddNode('llm')}
 			onSave={saveFlow}
 			onRun={runFlow}
 			onOpenHistory={() => historyPanelOpen = true}

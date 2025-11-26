@@ -77,49 +77,95 @@ export function buildPayload(node: AppNode): WorkerJob | null {
 		};
 	}
 
-	// HTTP node
-	if (!node.data.url || !node.data.method) {
-		console.warn(`Skipping Node ${node.id}: Missing URL or Method`);
-		return null;
-	}
-
-	const finalUrl = resolveVariables(node.data.url);
-
-	let finalHeaders: Record<string, string> | undefined = undefined;
-	if (node.data.headers) {
-		finalHeaders = {};
-		for (const [key, val] of Object.entries(node.data.headers)) {
-			finalHeaders[key] = resolveVariables(String(val));
+	// LLM node
+	if (node.type === 'llm') {
+		// Build messages array from system + user prompts
+		const messages: Array<{ role: string; content: string }> = [];
+		
+		if (node.data.systemPrompt) {
+			messages.push({ role: 'system', content: resolveVariables(node.data.systemPrompt) });
 		}
-	}
-
-	let finalBody = undefined;
-	if (node.data.body) {
-		const bodyString = typeof node.data.body === 'string'
-			? node.data.body
-			: JSON.stringify(node.data.body);
-
-		const resolvedBodyString = resolveVariables(bodyString);
-		try {
-			finalBody = JSON.parse(resolvedBodyString);
-		} catch (e) {
-			finalBody = resolvedBodyString;
+		if (node.data.userPrompt) {
+			messages.push({ role: 'user', content: resolveVariables(node.data.userPrompt) });
 		}
-	}
-
-	return {
-		id: node.id,
-		node: {
-			type: 'HTTP',
-			data: {
-				url: finalUrl,
-				method: node.data.method as HttpMethod,
-				headers: finalHeaders,
-				body: finalBody
+		
+		// Also support raw messages array if provided
+		if (node.data.messages && Array.isArray(node.data.messages)) {
+			for (const msg of node.data.messages) {
+				messages.push({
+					role: msg.role,
+					content: resolveVariables(msg.content)
+				});
 			}
-		},
-		max_retries: 3
-	};
+		}
+		
+		return {
+			id: node.id,
+			node: {
+				type: 'LLM',
+				data: {
+					base_url: resolveVariables(node.data.baseUrl || 'https://api.openai.com/v1'),
+					api_key: resolveVariables(node.data.apiKey || ''),
+					model: node.data.model || 'gpt-4o',
+					messages: messages,
+					temperature: node.data.temperature,
+					max_tokens: node.data.maxTokens,
+					stream: node.data.stream ?? false
+				}
+			},
+			max_retries: 3
+		};
+	}
+
+	// HTTP node
+	if (node.type === 'http-request') {
+		if (!node.data.url || !node.data.method) {
+			console.warn(`Skipping Node ${node.id}: Missing URL or Method`);
+			return null;
+		}
+
+		const finalUrl = resolveVariables(node.data.url);
+
+		let finalHeaders: Record<string, string> | undefined = undefined;
+		if (node.data.headers) {
+			finalHeaders = {};
+			for (const [key, val] of Object.entries(node.data.headers)) {
+				finalHeaders[key] = resolveVariables(String(val));
+			}
+		}
+
+		let finalBody = undefined;
+		if (node.data.body) {
+			const bodyString = typeof node.data.body === 'string'
+				? node.data.body
+				: JSON.stringify(node.data.body);
+
+			const resolvedBodyString = resolveVariables(bodyString);
+			try {
+				finalBody = JSON.parse(resolvedBodyString);
+			} catch (e) {
+				finalBody = resolvedBodyString;
+			}
+		}
+
+		return {
+			id: node.id,
+			node: {
+				type: 'HTTP',
+				data: {
+					url: finalUrl,
+					method: node.data.method as HttpMethod,
+					headers: finalHeaders,
+					body: finalBody
+				}
+			},
+			max_retries: 3
+		};
+	}
+
+	// Unsupported node type for isolated execution
+	console.warn(`Node type ${node.type} not supported for isolated execution`);
+	return null;
 }
 
 // Execute a single node (legacy mode - for manual single-node runs)

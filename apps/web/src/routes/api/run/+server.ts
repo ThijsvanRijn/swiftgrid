@@ -204,6 +204,20 @@ function buildJobFromNode(
     };
     
     if (node.type === 'code-execution') {
+        // Process inputs through variable interpolation
+        let finalInputs = node.data.inputs;
+        if (finalInputs) {
+            const inputStr = typeof finalInputs === 'string' 
+                ? finalInputs 
+                : JSON.stringify(finalInputs);
+            const resolvedStr = processString(inputStr);
+            try {
+                finalInputs = JSON.parse(resolvedStr);
+            } catch {
+                finalInputs = resolvedStr;
+            }
+        }
+        
         return {
             id: node.id,
             run_id: runId,
@@ -211,7 +225,7 @@ function buildJobFromNode(
                 type: 'CODE',
                 data: {
                     code: node.data.code || '',
-                    inputs: node.data.inputs
+                    inputs: finalInputs
                 }
             },
             retry_count: 0,
@@ -317,6 +331,47 @@ function buildJobFromNode(
             },
             retry_count: 0,
             max_retries: 0
+        };
+    }
+    
+    if (node.type === 'llm') {
+        // Build messages array from system + user prompts
+        const messages: Array<{ role: string; content: string }> = [];
+        
+        if (node.data.systemPrompt) {
+            messages.push({ role: 'system', content: processString(node.data.systemPrompt) });
+        }
+        if (node.data.userPrompt) {
+            messages.push({ role: 'user', content: processString(node.data.userPrompt) });
+        }
+        
+        // Also support raw messages array if provided
+        if (node.data.messages && Array.isArray(node.data.messages)) {
+            for (const msg of node.data.messages) {
+                messages.push({
+                    role: msg.role,
+                    content: processString(msg.content)
+                });
+            }
+        }
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'LLM',
+                data: {
+                    base_url: processString(node.data.baseUrl || 'https://api.openai.com/v1'),
+                    api_key: processString(node.data.apiKey || ''),
+                    model: node.data.model || 'gpt-4o',
+                    messages: messages,
+                    temperature: node.data.temperature,
+                    max_tokens: node.data.maxTokens,
+                    stream: node.data.stream ?? false
+                }
+            },
+            retry_count: 0,
+            max_retries: 3
         };
     }
     
