@@ -5,7 +5,7 @@
     export let data: AppNodeData;
     export let selected: boolean = false;
     
-    // Only show colored border while actively running
+    // Status states
     $: isRunning = data.status === 'running';
 
     // Format milliseconds to human-readable string
@@ -18,14 +18,16 @@
     }
 </script>
   
+<!-- 
+  Selection = subtle border highlight (always visible when selected)
+  Running = colored border (temporary during execution)
+-->
 <div class={`
-    min-w-[180px] bg-panel text-card-foreground rounded-none border transition-all duration-300
-    ${selected ? 'border-primary/60' : 'border-panel-border'}
-    ${isRunning ? 'border-amber-500!' : ''}
+    min-w-[180px] bg-panel text-card-foreground rounded-none border-2 transition-all duration-300
+    ${isRunning ? 'border-amber-500' : selected ? 'border-amber-500/50' : 'border-transparent'}
   `}
   style={`box-shadow: ${
     isRunning ? '0 0 0 1px rgba(245,158,11,0.3), 0 4px 12px -2px rgba(245,158,11,0.15)' :
-    selected ? '0 0 0 1px var(--primary), 0 4px 16px -4px rgba(0,0,0,0.1)' :
     'var(--shadow-float)'
   }`}>
     
@@ -46,23 +48,25 @@
         </div>
       </div>
       
-      <!-- Status badge -->
+      <!-- Status badge - consistent style across all states -->
       {#if isRunning}
-        <div class="flex items-center gap-1.5 px-1.5 py-0.5 bg-amber-500/15 rounded-sm">
-          <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-          <span class="text-[9px] font-medium text-amber-500">Waiting</span>
+        <div class="flex items-center gap-1 px-1.5 bg-amber-500/15 rounded-sm h-5">
+          <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+          <span class="text-[9px] font-medium text-amber-500 leading-none">Waiting</span>
         </div>
       {:else if data.status === 'success'}
-        <div class="flex items-center gap-1 px-1.5 py-0.5 bg-emerald-500/10 rounded-sm" title="Completed">
-          <svg class="w-3 h-3 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+        <div class="flex items-center gap-1 px-1.5 bg-emerald-500/15 rounded-sm h-5" title="Completed">
+          <svg class="w-2.5 h-2.5 text-emerald-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
             <path d="M20 6L9 17l-5-5"/>
           </svg>
+          <span class="text-[9px] font-medium text-emerald-500 leading-none">Done</span>
         </div>
       {:else if data.status === 'error'}
-        <div class="flex items-center gap-1 px-1.5 py-0.5 bg-red-500/10 rounded-sm" title="Failed">
-          <svg class="w-3 h-3 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-            <path d="m15 9-6 6M9 9l6 6"/>
+        <div class="flex items-center gap-1 px-1.5 bg-red-500/15 rounded-sm h-5" title="Failed">
+          <svg class="w-2.5 h-2.5 text-red-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+            <path d="M18 6 6 18M6 6l12 12"/>
           </svg>
+          <span class="text-[9px] font-medium text-red-500 leading-none">Error</span>
         </div>
       {/if}
     </div>
