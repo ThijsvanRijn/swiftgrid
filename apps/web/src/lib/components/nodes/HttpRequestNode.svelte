@@ -4,19 +4,19 @@
 
     export let data: AppNodeData;
     export let selected: boolean = false;
+    
+    // Only show colored border while actively running
+    $: isRunning = data.status === 'running';
+    $: hasResult = data.status === 'success' || data.status === 'error';
 </script>
   
 <div class={`
-    min-w-[220px] bg-panel text-card-foreground rounded-none border transition-colors
+    min-w-[220px] bg-panel text-card-foreground rounded-none border transition-all duration-300
     ${selected ? 'border-primary/60' : 'border-panel-border'}
-    ${data.status === 'running' ? 'border-blue-500!' : ''}
-    ${data.status === 'success' ? 'border-emerald-500!' : ''}
-    ${data.status === 'error' ? 'border-red-500!' : ''}
+    ${isRunning ? 'border-blue-500!' : ''}
   `}
   style={`box-shadow: ${
-    data.status === 'running' ? '0 0 0 1px rgba(59,130,246,0.3), 0 4px 12px -2px rgba(59,130,246,0.15)' :
-    data.status === 'success' ? '0 0 0 1px rgba(16,185,129,0.3), 0 4px 12px -2px rgba(16,185,129,0.15)' :
-    data.status === 'error' ? '0 0 0 1px rgba(239,68,68,0.3), 0 4px 12px -2px rgba(239,68,68,0.15)' :
+    isRunning ? '0 0 0 1px rgba(59,130,246,0.3), 0 4px 12px -2px rgba(59,130,246,0.15)' :
     selected ? '0 0 0 1px var(--primary), 0 4px 16px -4px rgba(0,0,0,0.1)' :
     'var(--shadow-float)'
   }`}>
@@ -45,18 +45,24 @@
         </div>
       </div>
       
-      <!-- Status indicator -->
-      {#if data.status === 'running'}
-        <span class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+      <!-- Status badge -->
+      {#if isRunning}
+        <div class="flex items-center gap-1.5 px-1.5 py-0.5 bg-blue-500/15 rounded-sm">
+          <span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+          <span class="text-[9px] font-medium text-blue-500">Running</span>
+        </div>
       {:else if data.status === 'success'}
-        <svg class="w-4 h-4 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M20 6L9 17l-5-5"/>
-        </svg>
+        <div class="flex items-center gap-1 px-1.5 py-0.5 bg-emerald-500/10 rounded-sm" title="Completed successfully">
+          <svg class="w-3 h-3 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+            <path d="M20 6L9 17l-5-5"/>
+          </svg>
+        </div>
       {:else if data.status === 'error'}
-        <svg class="w-4 h-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="m15 9-6 6M9 9l6 6"/>
-        </svg>
+        <div class="flex items-center gap-1 px-1.5 py-0.5 bg-red-500/10 rounded-sm" title="Failed">
+          <svg class="w-3 h-3 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+            <path d="m15 9-6 6M9 9l6 6"/>
+          </svg>
+        </div>
       {/if}
     </div>
   

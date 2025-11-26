@@ -6,11 +6,16 @@
 	import ResultsPanel from './sidebar/ResultsPanel.svelte';
 
 	let activeTab = $state<'config' | 'connections' | 'test'>('config');
+	let lastSelectedNodeId = $state<string | null>(null);
 
-	// Reset to config tab when a new node is selected
+	// Reset to config tab only when selecting a DIFFERENT node
 	$effect(() => {
-		if (flowStore.selectedNode) {
+		const currentNodeId = flowStore.selectedNode?.id ?? null;
+		if (currentNodeId && currentNodeId !== lastSelectedNodeId) {
+			lastSelectedNodeId = currentNodeId;
 			activeTab = 'config';
+		} else if (!currentNodeId) {
+			lastSelectedNodeId = null;
 		}
 	});
 </script>

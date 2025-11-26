@@ -65,6 +65,7 @@ export async function POST({ request }) {
     
     // Legacy: single node execution without run tracking
     let job = body as WorkerJob;
+    const isolated = body.isolated ?? false;
     
     // Convert to enhanced job (no run_id for legacy)
     const enhancedJob: EnhancedWorkerJob = {
@@ -75,7 +76,7 @@ export async function POST({ request }) {
         maxRetries: 3
     };
 
-    console.log("Received Job (legacy mode). Injecting secrets...");
+    console.log(`Received Job (legacy mode${isolated ? ', isolated' : ''}). Injecting secrets...`);
     
     const injectedJob = await injectSecrets(enhancedJob);
 
@@ -87,20 +88,21 @@ export async function POST({ request }) {
             id: injectedJob.id,
             node: injectedJob.node,
             retry_count: injectedJob.retryCount,
-            max_retries: injectedJob.maxRetries
+            max_retries: injectedJob.maxRetries,
+            isolated // Pass to worker so it doesn't trigger orchestration
         })
     );
 
-    return json({ success: true, streamId });
+    return json({ success: true, streamId, isolated });
 }
 
 /**
  * Start a full workflow run with event tracking
  */
-async function handleStartRun(body: { startRun: true; workflowId?: number; graph: any; trigger?: string }) {
-    const { workflowId, graph, trigger = 'manual' } = body;
+async function handleStartRun(body: { startRun: true; workflowId?: number; graph: any; trigger?: string; startFromNode?: string }) {
+    const { workflowId, graph, trigger = 'manual', startFromNode } = body;
     
-    console.log("Starting new workflow run...");
+    console.log(`Starting new workflow run${startFromNode ? ` from node ${startFromNode}` : ''}...`);
     
     // 1. Create the run record with snapshot
     const [run] = await db.insert(workflowRuns).values({
@@ -116,33 +118,46 @@ async function handleStartRun(body: { startRun: true; workflowId?: number; graph
     await db.insert(runEvents).values({
         runId: run.id,
         eventType: EVENT_TYPES.RUN_CREATED,
-        payload: { trigger, nodeCount: graph.nodes?.length ?? 0 }
+        payload: { trigger, nodeCount: graph.nodes?.length ?? 0, startFromNode }
     });
     
-    // 3. Find root nodes (nodes with no incoming edges)
+    // 3. Find starting nodes
     const nodes = graph.nodes ?? [];
     const edges = graph.edges ?? [];
-    const targetIds = new Set(edges.map((e: any) => e.target));
-    const rootNodes = nodes.filter((n: any) => !targetIds.has(n.id));
     
-    if (rootNodes.length === 0 && nodes.length > 0) {
-        console.warn("No root nodes found, running all nodes");
-        rootNodes.push(...nodes);
+    let startingNodes: any[];
+    
+    if (startFromNode) {
+        // Start from a specific node
+        const targetNode = nodes.find((n: any) => n.id === startFromNode);
+        if (!targetNode) {
+            return json({ success: false, error: `Node ${startFromNode} not found` }, { status: 400 });
+        }
+        startingNodes = [targetNode];
+    } else {
+        // Find root nodes (nodes with no incoming edges)
+        const targetIds = new Set(edges.map((e: any) => e.target));
+        startingNodes = nodes.filter((n: any) => !targetIds.has(n.id));
+        
+        if (startingNodes.length === 0 && nodes.length > 0) {
+            console.warn("No root nodes found, running all nodes");
+            startingNodes.push(...nodes);
+        }
     }
     
     // 4. Update run status to running
     await db.insert(runEvents).values({
         runId: run.id,
         eventType: EVENT_TYPES.RUN_STARTED,
-        payload: { rootNodes: rootNodes.map((n: any) => n.id) }
+        payload: { startingNodes: startingNodes.map((n: any) => n.id) }
     });
     
     // 5. Fetch secrets once for all nodes
     const allSecrets = await db.select().from(secrets);
     const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
     
-    // 6. Schedule root nodes
-    for (const node of rootNodes) {
+    // 6. Schedule starting nodes
+    for (const node of startingNodes) {
         const job = buildJobFromNode(node, run.id, secretMap);
         if (job) {
             // Log NODE_SCHEDULED event
@@ -165,7 +180,7 @@ async function handleStartRun(body: { startRun: true; workflowId?: number; graph
     return json({ 
         success: true, 
         runId: run.id,
-        scheduledNodes: rootNodes.map((n: any) => n.id)
+        scheduledNodes: startingNodes.map((n: any) => n.id)
     });
 }
 

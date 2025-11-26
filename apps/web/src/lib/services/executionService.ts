@@ -121,7 +121,8 @@ export function buildPayload(node: AppNode): WorkerJob | null {
 }
 
 // Execute a single node (legacy mode - for manual single-node runs)
-export async function executeNode(nodeId: string) {
+// Set isolated=true to prevent downstream nodes from being triggered
+export async function executeNode(nodeId: string, isolated: boolean = false) {
 	const node = flowStore.getNode(nodeId);
 	if (!node) return;
 
@@ -134,18 +135,105 @@ export async function executeNode(nodeId: string) {
 		return;
 	}
 
-	console.log(`Executing ${node.type}`, payload);
+	console.log(`Executing ${node.type}${isolated ? ' (isolated)' : ''}`, payload);
 
 	try {
 		await fetch('/api/run', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(payload)
+			body: JSON.stringify({ 
+				...payload,
+				isolated // Tell the backend not to trigger orchestration
+			})
 		});
 	} catch (e) {
 		console.error('Network error', e);
 		flowStore.updateNodeStatus(nodeId, 'error');
 	}
+}
+
+/**
+ * Run the flow starting from a specific node (and all downstream)
+ */
+export async function runFromNode(nodeId: string) {
+	// Reset statuses for this node and all downstream
+	const nodesToReset = getDownstreamNodes(nodeId);
+	nodesToReset.forEach(id => flowStore.updateNodeStatus(id, 'idle'));
+	
+	// Build the graph snapshot
+	const graph = {
+		nodes: flowStore.nodes.map(n => ({
+			id: n.id,
+			type: n.type,
+			data: n.data,
+			position: n.position
+		})),
+		edges: flowStore.edges.map(e => ({
+			id: e.id,
+			source: e.source,
+			target: e.target
+		}))
+	};
+	
+	console.log(`Starting flow from node ${nodeId}...`);
+	
+	try {
+		const response = await fetch('/api/run', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				startRun: true,
+				startFromNode: nodeId, // Start from this specific node
+				graph,
+				trigger: 'manual'
+			})
+		});
+		
+		const result = await response.json();
+		
+		if (result.success) {
+			currentRunId = result.runId;
+			console.log(`Run started from ${nodeId}: ${currentRunId}`);
+			
+			result.scheduledNodes.forEach((id: string) => {
+				flowStore.updateNodeStatus(id, 'running');
+			});
+		}
+	} catch (e) {
+		console.error('Network error:', e);
+	}
+}
+
+/**
+ * Get all nodes downstream from a given node (including the node itself)
+ */
+function getDownstreamNodes(nodeId: string): string[] {
+	const result = new Set<string>([nodeId]);
+	const queue = [nodeId];
+	
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		const outgoing = flowStore.edges.filter(e => e.source === current);
+		
+		for (const edge of outgoing) {
+			if (!result.has(edge.target)) {
+				result.add(edge.target);
+				queue.push(edge.target);
+			}
+		}
+	}
+	
+	return Array.from(result);
+}
+
+/**
+ * Get all starting nodes (nodes with no incoming edges)
+ */
+export function getStartingNodes(): string[] {
+	const nodesWithIncoming = new Set(flowStore.edges.map(e => e.target));
+	return flowStore.nodes
+		.filter(n => !nodesWithIncoming.has(n.id))
+		.map(n => n.id);
 }
 
 /**

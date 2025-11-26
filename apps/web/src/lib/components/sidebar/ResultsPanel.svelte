@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { flowStore } from '$lib/stores/flowStore.svelte';
 	import { sseService, type StreamChunk } from '$lib/services/sseService';
+	import { runFlow, executeNode, runFromNode, getStartingNodes } from '$lib/services/executionService';
 	import { onMount, onDestroy } from 'svelte';
 
 	// Streaming output state - keyed by node ID so we can show history
 	let chunksByNode = $state<Map<string, StreamChunk[]>>(new Map());
 	let streamingNodeId = $state<string | null>(null);
+	let isRunning = $state(false);
 
 	// Get chunks for the currently selected node
 	let currentChunks = $derived(
@@ -14,6 +16,58 @@
 	let isStreaming = $derived(
 		flowStore.selectedNode?.id === streamingNodeId
 	);
+
+	// Check if selected node is a starting node
+	let isStartingNode = $derived(() => {
+		if (!flowStore.selectedNode) return false;
+		return getStartingNodes().includes(flowStore.selectedNode.id);
+	});
+
+	// Run the entire flow from the beginning
+	async function handleRunFlow() {
+		if (isRunning) return;
+		isRunning = true;
+		
+		// Clear all previous chunks when starting a new run
+		chunksByNode = new Map();
+		
+		try {
+			await runFlow();
+		} finally {
+			isRunning = false;
+		}
+	}
+
+	// Run from this node (this node + all downstream)
+	async function handleRunFromHere() {
+		if (!flowStore.selectedNode || isRunning) return;
+		isRunning = true;
+		
+		// Clear chunks for this node and downstream
+		chunksByNode = new Map();
+		
+		try {
+			await runFromNode(flowStore.selectedNode.id);
+		} finally {
+			isRunning = false;
+		}
+	}
+
+	// Run ONLY this node (isolated, no downstream)
+	async function handleRunNodeIsolated() {
+		if (!flowStore.selectedNode || isRunning) return;
+		isRunning = true;
+		
+		// Clear chunks for this node
+		chunksByNode.delete(flowStore.selectedNode.id);
+		chunksByNode = new Map(chunksByNode);
+		
+		try {
+			await executeNode(flowStore.selectedNode.id, true); // isolated = true
+		} finally {
+			isRunning = false;
+		}
+	}
 
 	// Subscribe to chunk events
 	onMount(() => {
@@ -56,23 +110,73 @@
 {#if flowStore.selectedNode}
 	<div class="p-4 flex flex-col gap-4">
 		<!-- Run controls -->
-		<div class="flex gap-2">
-			<button class="flex-1 bg-sidebar-accent hover:bg-sidebar-accent/80 text-foreground px-3 py-2 rounded-none text-xs font-medium transition-colors">
-				Run Flow
-			</button>
-			<button class="flex-1 bg-sidebar-accent/50 hover:bg-sidebar-accent text-muted-foreground hover:text-foreground px-3 py-2 rounded-none text-xs font-medium transition-colors">
-				Load Previous Run
-			</button>
-		</div>
-
-		<!-- Options collapsible -->
-		<div class="border border-input rounded-none overflow-hidden">
-			<button class="w-full flex items-center justify-between px-3 py-2.5 text-xs font-medium text-foreground hover:bg-sidebar-accent/30 transition-colors">
-				<span>Options</span>
-				<svg class="w-4 h-4 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<path d="m9 18 6-6-6-6"/>
-				</svg>
-			</button>
+		<div class="flex flex-col gap-2">
+			<!-- Primary action: depends on whether this is a starting node -->
+			{#if isStartingNode()}
+				<!-- Starting node: Run entire flow -->
+				<button 
+					onclick={handleRunFlow}
+					disabled={isRunning}
+					class="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/50 text-white px-3 py-2.5 rounded-none text-xs font-medium transition-colors flex items-center justify-center gap-2"
+				>
+					{#if isRunning}
+						<svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+						</svg>
+						Running...
+					{:else}
+						<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+							<polygon points="5 3 19 12 5 21 5 3"/>
+						</svg>
+						Run Flow
+					{/if}
+				</button>
+			{:else}
+				<!-- Non-starting node: Run from here -->
+				<button 
+					onclick={handleRunFromHere}
+					disabled={isRunning}
+					class="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/50 text-white px-3 py-2.5 rounded-none text-xs font-medium transition-colors flex items-center justify-center gap-2"
+				>
+					{#if isRunning}
+						<svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+						</svg>
+						Running...
+					{:else}
+						<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+							<polygon points="5 3 19 12 5 21 5 3"/>
+						</svg>
+						Run From Here
+					{/if}
+				</button>
+			{/if}
+			
+			<!-- Secondary actions -->
+			<div class="flex gap-2">
+				<button 
+					onclick={handleRunNodeIsolated}
+					disabled={isRunning}
+					class="flex-1 bg-sidebar-accent hover:bg-sidebar-accent/80 disabled:opacity-50 text-foreground px-3 py-2 rounded-none text-xs font-medium transition-colors flex items-center justify-center gap-1.5"
+					title="Run only this node without triggering downstream nodes"
+				>
+					<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<rect x="3" y="3" width="18" height="18" rx="2"/>
+						<polygon points="10 8 16 12 10 16 10 8" fill="currentColor"/>
+					</svg>
+					Test Node
+				</button>
+				<button 
+					class="flex-1 bg-sidebar-accent/50 hover:bg-sidebar-accent text-muted-foreground hover:text-foreground px-3 py-2 rounded-none text-xs font-medium transition-colors flex items-center justify-center gap-1.5"
+					title="Coming soon: Load results from previous runs"
+				>
+					<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<circle cx="12" cy="12" r="10"/>
+						<polyline points="12 6 12 12 16 14"/>
+					</svg>
+					History
+				</button>
+			</div>
 		</div>
 
 		<!-- Results section -->

@@ -100,7 +100,7 @@ pub enum NodeType {
 
 // Enhanced job with run context and retry metadata
 #[typeshare]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WorkerJob {
     pub id: String,           // Node ID
     #[serde(default)]
@@ -110,6 +110,8 @@ pub struct WorkerJob {
     pub retry_count: u32,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    #[serde(default)]
+    pub isolated: bool,       // If true, don't trigger downstream nodes
 }
 
 fn default_max_retries() -> u32 { 3 }
@@ -127,6 +129,8 @@ pub struct ExecutionResult {
     pub timestamp: u64,
     #[typeshare(serialized_as = "number")]
     pub duration_ms: u64,
+    #[serde(default)]
+    pub isolated: bool,       // If true, frontend should not trigger downstream
 }
 
 // Message sent into the JS runtime thread
@@ -495,6 +499,7 @@ async fn process_job(
 ) {
     let start = Instant::now();
     let job_id = job.id.clone();
+    let job_isolated = job.isolated;
     let run_id = job.run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
     
     // Log NODE_STARTED event
@@ -699,6 +704,7 @@ async fn process_job(
             node: node_clone,  // Use the clone we made earlier
             retry_count: next_attempt,
             max_retries: job.max_retries,
+            isolated: job_isolated,
         };
         
         // Clone redis_client for the spawn closure
@@ -741,6 +747,7 @@ async fn process_job(
             body,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
             duration_ms,
+            isolated: job_isolated,
         };
 
         if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {

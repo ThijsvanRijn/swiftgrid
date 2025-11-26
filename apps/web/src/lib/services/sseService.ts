@@ -8,6 +8,7 @@ interface ExecutionResult {
     body: any;
     timestamp: number;
     duration_ms?: number;
+    isolated?: boolean;
 }
 
 // Streaming chunk type
@@ -56,9 +57,18 @@ function connect() {
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
-        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}`);
+        const isolatedInfo = result.isolated ? ' (isolated)' : '';
+        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}${isolatedInfo}`);
         
-        handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+        // Don't trigger downstream for isolated runs
+        if (!result.isolated) {
+            handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+        } else {
+            // Just update the node status, don't orchestrate
+            import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+                flowStore.updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
+            });
+        }
     });
 
     // Handle 'chunk' events (streaming output)
@@ -78,9 +88,17 @@ function connect() {
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
-        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}`);
+        const isolatedInfo = result.isolated ? ' (isolated)' : '';
+        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}${isolatedInfo}`);
         
-        handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+        // Don't trigger downstream for isolated runs
+        if (!result.isolated) {
+            handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+        } else {
+            import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+                flowStore.updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
+            });
+        }
     };
 
     eventSource.onerror = () => {
