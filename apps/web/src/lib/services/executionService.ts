@@ -210,7 +210,7 @@ export async function runFlow() {
 export async function handleExecutionResult(nodeId: string, isSuccess: boolean, body: any, runId?: string) {
 	flowStore.updateNodeStatus(nodeId, isSuccess ? 'success' : 'error', body);
 
-	const outgoingEdges = flowStore.edges.filter(e => e.source === nodeId);
+		const outgoingEdges = flowStore.edges.filter(e => e.source === nodeId);
 	
 	if (runId) {
 		// Tracked run: call orchestrator to schedule next nodes
@@ -240,11 +240,11 @@ export async function handleExecutionResult(nodeId: string, isSuccess: boolean, 
 		}
 	} else if (isSuccess && outgoingEdges.length > 0) {
 		// Legacy run: client-side chaining
-		setTimeout(() => {
-			outgoingEdges.forEach(edge => executeNode(edge.target));
-		}, 500);
+			setTimeout(() => {
+				outgoingEdges.forEach(edge => executeNode(edge.target));
+			}, 500);
+		}
 	}
-}
 
 /**
  * Get the current run ID (for debugging/UI)

@@ -117,8 +117,9 @@ function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait', position?: { 
 			type: 'webhook-wait',
 			data: {
 				label: 'Webhook Wait',
-				webhookDescription: 'Wait for external event',
-				webhookTimeoutMs: 7 * 24 * 60 * 60 * 1000,  // Default 7 days
+				description: 'Wait for external event',
+				timeoutMs: 7 * 24 * 60 * 60 * 1000,  // Default 7 days
+				timeoutStr: '7d',
 				status: 'idle'
 			},
 			position: position ?? fallbackPosition

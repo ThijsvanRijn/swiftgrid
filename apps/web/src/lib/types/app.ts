@@ -19,8 +19,9 @@ export type AppNodeData = {
     delayStr?: string;     // Human-readable: "5s", "2m", "1h"
 
     // Webhook Wait Node Fields
-    webhookDescription?: string;  // "Wait for payment confirmation"
-    webhookTimeoutMs?: number;    // Default 7 days
+    description?: string;   // "Wait for payment confirmation"
+    timeoutMs?: number;     // Timeout in milliseconds (default 7 days)
+    timeoutStr?: string;    // Human-readable: "5m", "1h", "7d"
 
     // UI State fields (Shared)
     status?: 'idle' | 'running' | 'success' | 'error';

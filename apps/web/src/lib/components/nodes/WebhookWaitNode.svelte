@@ -66,19 +66,25 @@
           <path d="m15 9-6 6M9 9l6 6"/>
         </svg>
       {:else}
-        <span class="text-[10px] text-muted-foreground">⏸ Suspends</span>
+        <div class="flex items-center gap-1">
+          <svg class="w-3 h-3 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="6" y="4" width="4" height="16"/>
+            <rect x="14" y="4" width="4" height="16"/>
+          </svg>
+          <span class="text-[10px] text-muted-foreground">Suspends</span>
+        </div>
       {/if}
     </div>
   
     <!-- Body -->
     <div class="px-3 py-2.5">
       <div class="text-xs text-foreground font-medium">
-        {data.webhookDescription || 'Wait for external webhook'}
+        {data.description || 'Wait for external webhook'}
       </div>
       
       <div class="flex items-center gap-2 mt-1.5">
         <span class="text-[10px] text-muted-foreground">Timeout:</span>
-        <span class="text-[10px] text-purple-500 font-mono">{formatTimeout(data.webhookTimeoutMs)}</span>
+        <span class="text-[10px] text-purple-500 font-mono">{data.timeoutStr || formatTimeout(data.timeoutMs)}</span>
       </div>
       
       {#if data.label && data.label !== 'Webhook Wait'}

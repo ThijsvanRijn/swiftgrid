@@ -26,7 +26,7 @@ async function injectSecrets(job: EnhancedWorkerJob): Promise<EnhancedWorkerJob>
             return match;
         });
     };
-
+    
     if (job.node.type === 'HTTP') {
         const data = job.node.data;
 
@@ -47,7 +47,7 @@ async function injectSecrets(job: EnhancedWorkerJob): Promise<EnhancedWorkerJob>
                 try { data.body = JSON.parse(bodyStr); } catch {}
             }
         }
-    }
+    } 
 
     return job;
 }
