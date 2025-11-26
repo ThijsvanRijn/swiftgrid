@@ -2,6 +2,9 @@ import type { AppNode } from '$lib/types/app';
 import { type WorkerJob, HttpMethod } from '@swiftgrid/shared';
 import { flowStore } from '$lib/stores/flowStore.svelte';
 
+// Current run ID (set when a run starts)
+let currentRunId: string | null = null;
+
 // Helper: Dig into an object using a path string "body.html_url"
 function getDeepValue(obj: any, path: string): any {
 	return path.split('.').reduce((acc, part) => acc && acc[part], obj);
@@ -117,7 +120,7 @@ export function buildPayload(node: AppNode): WorkerJob | null {
 	};
 }
 
-// Execute a single node
+// Execute a single node (legacy mode - for manual single-node runs)
 export async function executeNode(nodeId: string) {
 	const node = flowStore.getNode(nodeId);
 	if (!node) return;
@@ -145,32 +148,108 @@ export async function executeNode(nodeId: string) {
 	}
 }
 
-// Run the entire flow starting from root nodes
-export function runFlow() {
-	const targetIds = new Set(flowStore.edges.map((e) => e.target));
-	const rootNodes = flowStore.nodes.filter((n) => !targetIds.has(n.id));
-
-	if (rootNodes.length === 0 && flowStore.nodes.length > 0) {
-		alert('Cycle detected or no roots! Running all nodes as fallback.');
-		flowStore.nodes.forEach((n) => executeNode(n.id));
-		return;
+/**
+ * Run the entire flow as a tracked run with event logging
+ */
+export async function runFlow() {
+	// Reset all node statuses
+	flowStore.nodes.forEach(n => flowStore.updateNodeStatus(n.id, 'idle'));
+	
+	// Build the graph snapshot
+	const graph = {
+		nodes: flowStore.nodes.map(n => ({
+			id: n.id,
+			type: n.type,
+			data: n.data,
+			position: n.position
+		})),
+		edges: flowStore.edges.map(e => ({
+			id: e.id,
+			source: e.source,
+			target: e.target
+		}))
+	};
+	
+	console.log('Starting tracked workflow run...');
+	
+	try {
+		const response = await fetch('/api/run', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				startRun: true,
+				graph,
+				trigger: 'manual'
+			})
+		});
+		
+		const result = await response.json();
+		
+		if (result.success) {
+			currentRunId = result.runId;
+			console.log(`Run started: ${currentRunId}`);
+			console.log(`Scheduled nodes: ${result.scheduledNodes.join(', ')}`);
+			
+			// Mark scheduled nodes as running
+			result.scheduledNodes.forEach((nodeId: string) => {
+				flowStore.updateNodeStatus(nodeId, 'running');
+			});
+		} else {
+			console.error('Failed to start run:', result);
+		}
+	} catch (e) {
+		console.error('Network error starting run:', e);
 	}
-
-	console.log('Starting Flow with Roots:', rootNodes.map((n) => n.id));
-	rootNodes.forEach((n) => executeNode(n.id));
 }
 
-// Handle SSE result and trigger next nodes (daisy chain)
-export function handleExecutionResult(nodeId: string, isSuccess: boolean, body: any) {
+/**
+ * Handle SSE result and trigger next nodes
+ * For tracked runs, calls the orchestrator API
+ * For legacy runs, does client-side chaining
+ */
+export async function handleExecutionResult(nodeId: string, isSuccess: boolean, body: any, runId?: string) {
 	flowStore.updateNodeStatus(nodeId, isSuccess ? 'success' : 'error', body);
 
-	if (isSuccess) {
-		const outgoingEdges = flowStore.edges.filter(e => e.source === nodeId);
-		if (outgoingEdges.length > 0) {
-			setTimeout(() => {
-				outgoingEdges.forEach(edge => executeNode(edge.target));
-			}, 500);
+	const outgoingEdges = flowStore.edges.filter(e => e.source === nodeId);
+	
+	if (runId) {
+		// Tracked run: call orchestrator to schedule next nodes
+		try {
+			const response = await fetch('/api/orchestrate', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ runId, nodeId, success: isSuccess })
+			});
+			
+			const result = await response.json();
+			
+			if (result.scheduledNodes?.length > 0) {
+				console.log(`Orchestrator scheduled: ${result.scheduledNodes.join(', ')}`);
+				// Mark scheduled nodes as running
+				result.scheduledNodes.forEach((id: string) => {
+					flowStore.updateNodeStatus(id, 'running');
+				});
+			}
+			
+			if (result.status === 'completed' || result.status === 'failed') {
+				console.log(`Run ${runId} finished: ${result.status}`);
+				currentRunId = null;
+			}
+		} catch (e) {
+			console.error('Failed to call orchestrator:', e);
 		}
+	} else if (isSuccess && outgoingEdges.length > 0) {
+		// Legacy run: client-side chaining
+		setTimeout(() => {
+			outgoingEdges.forEach(edge => executeNode(edge.target));
+		}, 500);
 	}
+}
+
+/**
+ * Get the current run ID (for debugging/UI)
+ */
+export function getCurrentRunId(): string | null {
+	return currentRunId;
 }
 

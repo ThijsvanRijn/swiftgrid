@@ -12,3 +12,13 @@ tokio = { version = "1.48.0", features = ["full"] }
 typeshare = "1.0.0"
 rquickjs = { version = "0.10.0", features = ["full-async"] }
 uuid = { version = "1.16", features = ["v4"] }
+
+# Database for event logging
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Better error handling
+thiserror = "2.0"
+
+# Backoff for retries
+rand = "0.9"

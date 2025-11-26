@@ -1,5 +1,14 @@
-import type { ExecutionResult } from '@swiftgrid/shared';
 import { handleExecutionResult } from './executionService';
+
+// Enhanced result type (matches updated worker output)
+interface ExecutionResult {
+    node_id: string;
+    run_id?: string;
+    status_code: number;
+    body: any;
+    timestamp: number;
+    duration_ms?: number;
+}
 
 // SSE connection state
 let eventSource: EventSource | null = null;
@@ -29,11 +38,15 @@ function connect() {
     };
 
     eventSource.onmessage = (event) => {
-        // SSE comments (starting with :) are filtered by the browser
-        // so we only receive actual data messages here
         const result: ExecutionResult = JSON.parse(event.data);
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
-        handleExecutionResult(result.node_id, isSuccess, result.body);
+        
+        // Log with duration if available
+        const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
+        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}`);
+        
+        // Pass run_id to handler for proper orchestration
+        handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
     };
 
     eventSource.onerror = () => {

@@ -10,3 +10,74 @@ export const REDIS_STREAMS = {
     RESULTS: 'swiftgrid_results'
 } as const;
 
+// =============================================================================
+// EVENT TYPES - Used by both worker and orchestrator
+// =============================================================================
+export const EVENT_TYPES = {
+    // Run lifecycle
+    RUN_CREATED: 'RUN_CREATED',
+    RUN_STARTED: 'RUN_STARTED', 
+    RUN_COMPLETED: 'RUN_COMPLETED',
+    RUN_FAILED: 'RUN_FAILED',
+    RUN_CANCELLED: 'RUN_CANCELLED',
+    
+    // Node lifecycle
+    NODE_SCHEDULED: 'NODE_SCHEDULED',
+    NODE_STARTED: 'NODE_STARTED',
+    NODE_COMPLETED: 'NODE_COMPLETED',
+    NODE_FAILED: 'NODE_FAILED',
+    NODE_RETRY_SCHEDULED: 'NODE_RETRY_SCHEDULED',
+    NODE_SUSPENDED: 'NODE_SUSPENDED',
+    NODE_RESUMED: 'NODE_RESUMED',
+    NODE_SKIPPED: 'NODE_SKIPPED'
+} as const;
+
+export type EventType = typeof EVENT_TYPES[keyof typeof EVENT_TYPES];
+
+// =============================================================================
+// RUN STATUS - Workflow execution states
+// =============================================================================
+export const RUN_STATUS = {
+    PENDING: 'pending',
+    RUNNING: 'running',
+    COMPLETED: 'completed',
+    FAILED: 'failed',
+    CANCELLED: 'cancelled'
+} as const;
+
+export type RunStatus = typeof RUN_STATUS[keyof typeof RUN_STATUS];
+
+// =============================================================================
+// ENHANCED WORKER JOB - Now includes run context
+// =============================================================================
+export interface EnhancedWorkerJob {
+    id: string;                    // Node ID
+    runId: string;                 // Run UUID (for event logging)
+    node: import('./worker').NodeType;
+    
+    // Retry metadata
+    retryCount?: number;
+    maxRetries?: number;
+}
+
+// =============================================================================
+// EVENT PAYLOADS - Type-safe event data
+// =============================================================================
+export interface NodeCompletedPayload {
+    result: any;
+    durationMs: number;
+}
+
+export interface NodeFailedPayload {
+    error: string;
+    fatal: boolean;
+    attempts: number;
+    statusCode?: number;
+}
+
+export interface NodeRetryPayload {
+    attempt: number;
+    error: string;
+    retryAfter: string; // ISO timestamp
+}
+
