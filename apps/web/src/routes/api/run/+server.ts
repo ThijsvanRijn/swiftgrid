@@ -294,5 +294,31 @@ function buildJobFromNode(
         };
     }
     
+    if (node.type === 'router') {
+        const conditions = node.data.conditions || [];
+        const defaultOutput = node.data.defaultOutput || '';
+        const mode = node.data.routerMode || 'first_match';
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'ROUTER',
+                data: {
+                    route_by: node.data.routeBy || '',
+                    conditions: conditions.map((c: any) => ({
+                        id: c.id,
+                        label: c.label,
+                        expression: c.expression
+                    })),
+                    default_output: defaultOutput,
+                    mode: mode
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
+        };
+    }
+    
     return null;
 }

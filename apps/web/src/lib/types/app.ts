@@ -1,5 +1,5 @@
 import type { Node } from '@xyflow/svelte';
-import type { HttpMethod } from '@swiftgrid/shared';
+import type { HttpMethod, RouterCondition } from '@swiftgrid/shared';
 
 // 1. Define the Data Shape
 export type AppNodeData = {
@@ -22,6 +22,12 @@ export type AppNodeData = {
     description?: string;   // "Wait for payment confirmation"
     timeoutMs?: number;     // Timeout in milliseconds (default 7 days)
     timeoutStr?: string;    // Human-readable: "5m", "1h", "7d"
+
+    // Router Node Fields
+    routeBy?: string;                   // Variable to evaluate: "{{node.status}}"
+    conditions?: RouterCondition[];     // Conditions to check in order
+    defaultOutput?: string;             // Output handle if no conditions match
+    routerMode?: 'first_match' | 'broadcast';  // Evaluation mode
 
     // UI State fields (Shared)
     status?: 'idle' | 'running' | 'success' | 'error';

@@ -72,7 +72,8 @@ export function buildPayload(node: AppNode): WorkerJob | null {
 					code: node.data.code || '',
 					inputs: finalInputs
 				}
-			}
+			},
+			max_retries: 3
 		};
 	}
 
@@ -116,7 +117,8 @@ export function buildPayload(node: AppNode): WorkerJob | null {
 				headers: finalHeaders,
 				body: finalBody
 			}
-		}
+		},
+		max_retries: 3
 	};
 }
 

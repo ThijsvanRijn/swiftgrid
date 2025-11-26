@@ -9,6 +9,109 @@ import { env } from '$env/dynamic/private';
 const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
 
 /**
+ * Get the result of a Router node and evaluate which outputs should fire
+ * This is called when a router node completes, to determine downstream routing
+ */
+async function evaluateRouterForRun(
+    runId: string, 
+    nodeId: string,
+    routerNode: any,
+    nodeOutputs: Map<string, any>
+): Promise<{ firedOutputs: string[] } | null> {
+    // Get the router's config from the node
+    const routeByRaw = routerNode.data.routeBy || '';
+    const conditions = routerNode.data.conditions || [];
+    const defaultOutput = routerNode.data.defaultOutput || '';
+    const mode = routerNode.data.routerMode || 'first_match';
+    
+    // Resolve the routeBy expression using node outputs
+    const processString = (str: string) => {
+        return str.replace(/{{(.*?)}}/g, (match, variablePath) => {
+            const cleanPath = variablePath.trim();
+            const dotIndex = cleanPath.indexOf('.');
+            if (dotIndex > 0) {
+                const refNodeId = cleanPath.substring(0, dotIndex);
+                const fieldPath = cleanPath.substring(dotIndex + 1);
+                const nodeOutput = nodeOutputs.get(refNodeId);
+                if (nodeOutput !== undefined) {
+                    const pathParts = fieldPath.split('.');
+                    let value: any = nodeOutput;
+                    for (const part of pathParts) {
+                        if (value && typeof value === 'object' && part in value) {
+                            value = value[part];
+                        } else {
+                            return match;
+                        }
+                    }
+                    return typeof value === 'string' ? value : JSON.stringify(value);
+                }
+            }
+            return match;
+        });
+    };
+    
+    const routeByResolved = processString(routeByRaw);
+    
+    // Parse the resolved value
+    let routeByValue: any = routeByResolved;
+    if (/^-?\d+(\.\d+)?$/.test(routeByResolved)) {
+        routeByValue = parseFloat(routeByResolved);
+    } else if (routeByResolved === 'true') {
+        routeByValue = true;
+    } else if (routeByResolved === 'false') {
+        routeByValue = false;
+    } else {
+        try { routeByValue = JSON.parse(routeByResolved); } catch {}
+    }
+    
+    // Evaluate conditions
+    const firedOutputs = evaluateRouterConditions(routeByValue, conditions, defaultOutput, mode);
+    
+    console.log(`Router ${nodeId}: routeBy="${routeByRaw}" resolved to ${JSON.stringify(routeByValue)}, fired: [${firedOutputs.join(', ')}]`);
+    
+    return { firedOutputs };
+}
+
+/**
+ * Evaluate router conditions and determine which outputs to fire
+ * Uses simple JS evaluation (sandboxed in the future)
+ */
+function evaluateRouterConditions(
+    routeByValue: any,
+    conditions: Array<{ id: string; expression: string }>,
+    defaultOutput: string,
+    mode: string
+): string[] {
+    const firedOutputs: string[] = [];
+    
+    for (const condition of conditions) {
+        try {
+            // Create a simple evaluator with 'value' as the input
+            const evalFn = new Function('value', `return ${condition.expression}`);
+            const result = evalFn(routeByValue);
+            
+            if (result) {
+                firedOutputs.push(condition.id);
+                
+                // In first_match mode, stop after first match
+                if (mode === 'first_match') {
+                    return firedOutputs;
+                }
+            }
+        } catch (e) {
+            console.warn(`Router condition eval error for ${condition.id}:`, e);
+        }
+    }
+    
+    // If no conditions matched and we have a default, use it
+    if (firedOutputs.length === 0 && defaultOutput) {
+        firedOutputs.push(defaultOutput);
+    }
+    
+    return firedOutputs;
+}
+
+/**
  * POST /api/orchestrate
  * Called when a node completes to schedule the next nodes
  * 
@@ -37,8 +140,41 @@ export async function POST({ request }) {
     const graph = run.snapshotGraph as { nodes: any[]; edges: any[] };
     const { nodes, edges } = graph;
     
+    // First, get completed node outputs for variable resolution
+    const completedEvents = await db.select()
+        .from(runEvents)
+        .where(and(
+            eq(runEvents.runId, runId),
+            eq(runEvents.eventType, EVENT_TYPES.NODE_COMPLETED)
+        ));
+    
+    const nodeOutputs = new Map<string, any>();
+    for (const event of completedEvents) {
+        if (event.nodeId && event.payload && typeof event.payload === 'object') {
+            const payload = event.payload as { result?: any };
+            if (payload.result !== undefined) {
+                nodeOutputs.set(event.nodeId, payload.result);
+            }
+        }
+    }
+    
     // 2. Find nodes that depend on the completed node
-    const dependentEdges = edges.filter(e => e.source === nodeId);
+    // For Router nodes, we need to check which output handle(s) fired
+    const completedNode = nodes.find(n => n.id === nodeId);
+    let dependentEdges = edges.filter(e => e.source === nodeId);
+    
+    // If the completed node was a Router, filter edges based on which outputs fired
+    if (completedNode?.type === 'router') {
+        const routerResult = await evaluateRouterForRun(runId, nodeId, completedNode, nodeOutputs);
+        if (routerResult?.firedOutputs) {
+            const firedOutputs = new Set(routerResult.firedOutputs);
+            dependentEdges = dependentEdges.filter(e => 
+                !e.sourceHandle || firedOutputs.has(e.sourceHandle)
+            );
+            console.log(`Router ${nodeId} fired outputs: ${[...firedOutputs].join(', ')}`);
+        }
+    }
+    
     const nextNodeIds = dependentEdges.map(e => e.target);
     
     if (nextNodeIds.length === 0) {
@@ -95,14 +231,7 @@ export async function POST({ request }) {
     // 3. For each dependent node, check if ALL its dependencies are satisfied
     const nodesToSchedule: any[] = [];
     
-    // Get all completed nodes for this run
-    const completedEvents = await db.select()
-        .from(runEvents)
-        .where(and(
-            eq(runEvents.runId, runId),
-            eq(runEvents.eventType, EVENT_TYPES.NODE_COMPLETED)
-        ));
-    
+    // Use the completedEvents we already fetched above
     const completedNodeIds = new Set(completedEvents.map(e => e.nodeId));
     
     for (const nextNodeId of nextNodeIds) {
@@ -127,21 +256,9 @@ export async function POST({ request }) {
         return json({ message: 'Dependencies not yet satisfied', scheduledNodes: [] });
     }
     
-    // 4. Fetch secrets and node outputs for variable interpolation
+    // 4. Fetch secrets for variable interpolation (nodeOutputs already built above)
     const allSecrets = await db.select().from(secrets);
     const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
-    
-    // Build a map of nodeId -> output from completed events
-    // The worker stores the output as "result" in the event payload
-    const nodeOutputs = new Map<string, any>();
-    for (const event of completedEvents) {
-        if (event.nodeId && event.payload && typeof event.payload === 'object') {
-            const payload = event.payload as { result?: any };
-            if (payload.result !== undefined) {
-                nodeOutputs.set(event.nodeId, payload.result);
-            }
-        }
-    }
     
     const scheduledNodeIds: string[] = [];
     
@@ -304,6 +421,34 @@ function buildJobFromNode(
                     timeout_ms: node.data.timeoutMs || (7 * 24 * 60 * 60 * 1000),
                     timeout_str: node.data.timeoutStr,
                     description: node.data.description || 'Wait for external event'
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
+        };
+    }
+    
+    if (node.type === 'router') {
+        // Router node: just send the config to the worker
+        // The actual routing evaluation happens in the orchestrator when the node completes
+        const conditions = node.data.conditions || [];
+        const defaultOutput = node.data.defaultOutput || '';
+        const mode = node.data.routerMode || 'first_match';
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'ROUTER',
+                data: {
+                    route_by: node.data.routeBy || '',
+                    conditions: conditions.map((c: any) => ({
+                        id: c.id,
+                        label: c.label,
+                        expression: c.expression
+                    })),
+                    default_output: defaultOutput,
+                    mode: mode
                 }
             },
             retry_count: 0,

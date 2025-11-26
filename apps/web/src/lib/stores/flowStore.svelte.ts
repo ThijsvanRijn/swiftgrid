@@ -70,7 +70,7 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 }
 
 // Adds a new node at the given position (or random fallback)
-function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait', position?: { x: number; y: number }) {
+function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router', position?: { x: number; y: number }) {
 	const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
 
 	let newNode: AppNode;
@@ -106,6 +106,25 @@ function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait', position?: { 
 				label: 'Wait',
 				delayMs: 5000,  // Default 5 seconds
 				delayStr: '5s',
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else if (type === 'router') {
+		// Router node with default conditions
+		const nodeId = generateId();
+		newNode = {
+			id: nodeId,
+			type: 'router',
+			data: {
+				label: 'Router',
+				routeBy: '{{prev.status}}',  // Default: route by previous node's status
+				conditions: [
+					{ id: 'success', label: 'Success', expression: 'value >= 200 && value < 300' },
+					{ id: 'error', label: 'Error', expression: 'value >= 400' }
+				],
+				defaultOutput: 'default',
+				routerMode: 'first_match',
 				status: 'idle'
 			},
 			position: position ?? fallbackPosition

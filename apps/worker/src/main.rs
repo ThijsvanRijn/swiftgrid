@@ -85,6 +85,28 @@ pub struct WebhookResumeData {
     pub payload: Option<serde_json::Value>,  // Data from the webhook POST
 }
 
+// Router condition - evaluates to determine which branch to take
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RouterCondition {
+    pub id: String,           // Output handle ID
+    pub label: String,        // Display label (e.g., "Success", "Error")
+    pub expression: String,   // JS expression: "value >= 200 && value < 300"
+}
+
+// Router node - conditional branching based on data
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RouterNodeData {
+    pub route_by: String,                    // Variable to evaluate: "{{node.status}}"
+    pub conditions: Vec<RouterCondition>,    // Conditions to check in order
+    pub default_output: String,              // Output if no conditions match
+    #[serde(default = "default_router_mode")]
+    pub mode: String,                        // "first_match" or "broadcast"
+}
+
+fn default_router_mode() -> String { "first_match".to_string() }
+
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
@@ -96,6 +118,7 @@ pub enum NodeType {
     DelayResume(DelayResumeData),
     WebhookWait(WebhookWaitData),
     WebhookResume(WebhookResumeData),
+    Router(RouterNodeData),
 }
 
 // Enhanced job with run context and retry metadata
@@ -659,6 +682,23 @@ async fn process_job(
                 "resumed": true,
                 "webhook_payload": data.payload,
                 "message": "Webhook received, workflow resumed"
+            })))
+        }
+        NodeType::Router(data) => {
+            // Router node - evaluation happens in orchestrator since it needs resolved variables
+            // The worker just acknowledges and returns the routing config
+            println!("  → Router: '{}' mode with {} conditions", data.mode, data.conditions.len());
+            
+            (200, Some(serde_json::json!({
+                "router": true,
+                "route_by": data.route_by,
+                "conditions": data.conditions.iter().map(|c| serde_json::json!({
+                    "id": c.id,
+                    "label": c.label,
+                    "expression": c.expression
+                })).collect::<Vec<_>>(),
+                "default_output": data.default_output,
+                "mode": data.mode
             })))
         }
     };

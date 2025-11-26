@@ -7,11 +7,23 @@ export interface CodeNodeData {
 	inputs?: any;
 }
 
+export interface DelayNodeData {
+	duration_ms: number;
+	duration_str?: string;
+}
+
+export interface DelayResumeData {
+	original_delay_ms: number;
+}
+
 export interface ExecutionResult {
 	node_id: string;
+	run_id?: string;
 	status_code: number;
 	body: any;
 	timestamp: number;
+	duration_ms: number;
+	isolated?: boolean;
 }
 
 export enum HttpMethod {
@@ -29,12 +41,44 @@ export interface HttpNodeData {
 	body?: any;
 }
 
+export interface RouterCondition {
+	id: string;
+	label: string;
+	expression: string;
+}
+
+export interface RouterNodeData {
+	route_by: string;
+	conditions: RouterCondition[];
+	default_output: string;
+	mode: string;
+}
+
+export interface WebhookResumeData {
+	resume_token: string;
+	payload: any;
+}
+
+export interface WebhookWaitData {
+	description?: string;
+	timeout_ms: number;
+}
+
 export type NodeType = 
 	| { type: "HTTP", data: HttpNodeData }
-	| { type: "CODE", data: CodeNodeData };
+	| { type: "CODE", data: CodeNodeData }
+	| { type: "DELAY", data: DelayNodeData }
+	| { type: "DELAYRESUME", data: DelayResumeData }
+	| { type: "WEBHOOKWAIT", data: WebhookWaitData }
+	| { type: "WEBHOOKRESUME", data: WebhookResumeData }
+	| { type: "ROUTER", data: RouterNodeData };
 
 export interface WorkerJob {
 	id: string;
+	run_id?: string;
 	node: NodeType;
+	retry_count?: number;
+	max_retries: number;
+	isolated?: boolean;
 }
 
