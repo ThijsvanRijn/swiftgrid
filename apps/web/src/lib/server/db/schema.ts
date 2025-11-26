@@ -1,4 +1,4 @@
-import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, index } from 'drizzle-orm/pg-core';
+import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, index, boolean } from 'drizzle-orm/pg-core';
 
 // =============================================================================
 // WORKFLOWS - The flow definitions (nodes + edges)
@@ -7,7 +7,11 @@ export const workflows = pgTable('workflows', {
   id: serial('id').primaryKey(),
   name: text('name').notNull(),
   graph: jsonb('graph').notNull(), 
-  webhookEnabled: text('webhook_enabled').default('false'), // For future webhook triggers
+  
+  // Webhook configuration
+  webhookEnabled: boolean('webhook_enabled').default(false),
+  webhookSecret: text('webhook_secret'),  // HMAC secret for signature validation
+  
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow()
 });
@@ -133,4 +137,32 @@ export const suspensions = pgTable('suspensions', {
 }, (table) => [
   index('idx_suspensions_token').on(table.resumeToken),
   index('idx_suspensions_expires').on(table.expiresAt)
+]);
+
+// =============================================================================
+// WEBHOOK DELIVERIES - For idempotency and audit trail
+// =============================================================================
+export const webhookDeliveries = pgTable('webhook_deliveries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workflowId: integer('workflow_id').references(() => workflows.id).notNull(),
+  
+  // Idempotency key (hash of request body or X-Idempotency-Key header)
+  idempotencyKey: text('idempotency_key').notNull(),
+  
+  // Request details (for debugging)
+  requestBody: jsonb('request_body'),
+  requestHeaders: jsonb('request_headers'),
+  sourceIp: text('source_ip'),
+  
+  // Response we returned (for idempotent replay)
+  responseStatus: integer('response_status').notNull(),
+  responseBody: jsonb('response_body'),
+  
+  // Link to the run we created (if successful)
+  runId: uuid('run_id').references(() => workflowRuns.id),
+  
+  createdAt: timestamp('created_at').defaultNow()
+}, (table) => [
+  index('idx_webhook_deliveries_idempotency').on(table.workflowId, table.idempotencyKey),
+  index('idx_webhook_deliveries_workflow').on(table.workflowId)
 ]);
