@@ -64,6 +64,27 @@ pub struct DelayResumeData {
     pub original_delay_ms: u64,
 }
 
+// Webhook Wait - suspends until external POST arrives
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WebhookWaitData {
+    pub description: Option<String>,      // "Wait for payment confirmation"
+    #[typeshare(serialized_as = "number")]
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,                  // Default 7 days
+}
+
+fn default_timeout_ms() -> u64 { 7 * 24 * 60 * 60 * 1000 } // 7 days
+
+// Resume after webhook received
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WebhookResumeData {
+    pub resume_token: String,
+    #[typeshare(serialized_as = "any")]
+    pub payload: Option<serde_json::Value>,  // Data from the webhook POST
+}
+
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
@@ -73,6 +94,8 @@ pub enum NodeType {
     Code(CodeNodeData),
     Delay(DelayNodeData),
     DelayResume(DelayResumeData),
+    WebhookWait(WebhookWaitData),
+    WebhookResume(WebhookResumeData),
 }
 
 // Enhanced job with run context and retry metadata
@@ -123,6 +146,8 @@ enum EventType {
     NodeCompleted,
     NodeFailed,
     NodeRetryScheduled,
+    NodeSuspended,
+    NodeResumed,
 }
 
 impl EventType {
@@ -132,6 +157,8 @@ impl EventType {
             EventType::NodeCompleted => "NODE_COMPLETED",
             EventType::NodeFailed => "NODE_FAILED",
             EventType::NodeRetryScheduled => "NODE_RETRY_SCHEDULED",
+            EventType::NodeSuspended => "NODE_SUSPENDED",
+            EventType::NodeResumed => "NODE_RESUMED",
         }
     }
 }
@@ -279,10 +306,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let in_flight = Arc::new(AtomicUsize::new(0));
 
-    // Spawn the scheduler loop (checks for delayed jobs ready to run)
+    // Spawn the scheduler loop (checks for delayed jobs and expired suspensions)
     let scheduler_redis = redis_client.clone();
+    let scheduler_db = db_pool.clone();
     tokio::spawn(async move {
-        scheduler_loop(scheduler_redis).await;
+        scheduler_loop(scheduler_redis, scheduler_db).await;
     });
 
     loop {
@@ -470,10 +498,91 @@ async fn process_job(
                 "message": format!("Delay completed after {}ms", data.original_delay_ms)
             })))
         }
+        NodeType::WebhookWait(data) => {
+            // SUSPEND: Create a suspension record and return immediately
+            // The workflow will resume when POST /api/hooks/resume/[token] is called
+            
+            let resume_token = Uuid::new_v4().to_string();
+            let expires_at = chrono::Utc::now() + chrono::Duration::milliseconds(data.timeout_ms as i64);
+            
+            println!("  → Suspending for webhook (token: {}, expires: {})", 
+                &resume_token[..8], expires_at.format("%Y-%m-%d %H:%M"));
+            
+            // Create suspension in database
+            if let Some(ref rid) = run_id {
+                // Log suspension event
+                let _ = log_event(&db_pool, rid, &job_id, EventType::NodeSuspended, serde_json::json!({
+                    "type": "webhook",
+                    "resume_token": resume_token,
+                    "description": data.description,
+                    "expires_at": expires_at.to_rfc3339(),
+                })).await;
+                
+                // Create suspension record
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO suspensions (run_id, node_id, suspension_type, resume_token, execution_context, expires_at)
+                    VALUES ($1, $2, 'webhook', $3, $4, $5)
+                    "#
+                )
+                .bind(rid)
+                .bind(&job_id)
+                .bind(&resume_token)
+                .bind(serde_json::json!({
+                    "description": data.description,
+                    "timeout_ms": data.timeout_ms,
+                }))
+                .bind(expires_at)
+                .execute(&db_pool)
+                .await;
+            }
+            
+            // Return 202 (Accepted) - this signals "suspended, don't publish result yet"
+            // The orchestrator should NOT schedule dependent nodes
+            (202, Some(serde_json::json!({
+                "suspended": true,
+                "resume_token": resume_token,
+                "resume_url": format!("/api/hooks/resume/{}", resume_token),
+                "expires_at": expires_at.to_rfc3339(),
+                "description": data.description
+            })))
+        }
+        NodeType::WebhookResume(data) => {
+            // This is called when the webhook POST arrives
+            println!("  → Webhook resumed (token: {})", &data.resume_token[..8]);
+            
+            // Log resume event
+            if let Some(ref rid) = run_id {
+                let _ = log_event(&db_pool, rid, &job_id, EventType::NodeResumed, serde_json::json!({
+                    "source": "webhook",
+                    "resume_token": data.resume_token,
+                    "payload": data.payload,
+                })).await;
+            }
+            
+            (200, Some(serde_json::json!({
+                "resumed": true,
+                "webhook_payload": data.payload,
+                "message": "Webhook received, workflow resumed"
+            })))
+        }
     };
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_success = status >= 200 && status < 300;
+    let is_suspended = status == 202 && body.as_ref().map(|b| b.get("suspended").is_some()).unwrap_or(false);
+
+    // If suspended, don't publish result or trigger orchestrator
+    // The workflow will resume when the webhook arrives
+    if is_suspended {
+        println!("  → Node suspended, waiting for external trigger");
+        // ACK the message but don't publish result
+        if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+            let _: RedisResult<()> = con.xack("swiftgrid_stream", &group_name, &[&msg_id]).await;
+            let _: RedisResult<()> = con.xdel("swiftgrid_stream", &[&msg_id]).await;
+        }
+        return;
+    }
 
     // Handle result with retry logic
     if !is_success && is_retryable_error(status) && job.retry_count < job.max_retries {
@@ -631,14 +740,17 @@ async fn run_js_safely(
 
 // =============================================================================
 // SCHEDULER LOOP - Moves delayed jobs to active queue when ready
+//                  Also checks for expired suspensions
 // =============================================================================
 
-async fn scheduler_loop(redis_client: redis::Client) {
-    println!("Scheduler started (polling every 1s for delayed jobs)");
+async fn scheduler_loop(redis_client: redis::Client, db_pool: PgPool) {
+    println!("Scheduler started (polling every 1s for delayed jobs and expired suspensions)");
     
     let poll_interval = Duration::from_secs(1);
+    let mut suspension_check_counter = 0u32;
     
     loop {
+        // Check delayed jobs every iteration
         if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -678,6 +790,70 @@ async fn scheduler_loop(redis_client: redis::Client) {
             }
         }
         
+        // Check for expired suspensions every 10 seconds
+        suspension_check_counter += 1;
+        if suspension_check_counter >= 10 {
+            suspension_check_counter = 0;
+            check_expired_suspensions(&db_pool).await;
+        }
+        
         tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Check for expired suspensions and fail them
+async fn check_expired_suspensions(pool: &PgPool) {
+    // Find expired suspensions that haven't been resumed
+    let expired: Vec<(Uuid, String, Uuid)> = match sqlx::query_as(
+        r#"
+        SELECT id, node_id, run_id FROM suspensions 
+        WHERE resumed_at IS NULL 
+          AND expires_at IS NOT NULL 
+          AND expires_at < NOW()
+        LIMIT 10
+        "#
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Scheduler: Failed to query expired suspensions: {}", e);
+            return;
+        }
+    };
+    
+    for (suspension_id, node_id, run_id) in expired {
+        println!("Scheduler: Expiring suspension for node {} in run {}", node_id, run_id);
+        
+        // Log NODE_FAILED event
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO run_events (run_id, node_id, event_type, payload)
+            VALUES ($1, $2, 'NODE_FAILED', $3)
+            "#
+        )
+        .bind(&run_id)
+        .bind(&node_id)
+        .bind(serde_json::json!({
+            "error": "Suspension timeout expired",
+            "fatal": true,
+        }))
+        .execute(pool)
+        .await;
+        
+        // Mark suspension as resolved (with timeout)
+        let _ = sqlx::query(
+            r#"
+            UPDATE suspensions 
+            SET resumed_at = NOW(), 
+                resumed_by = 'scheduler:timeout',
+                resume_payload = $1
+            WHERE id = $2
+            "#
+        )
+        .bind(serde_json::json!({"timeout": true}))
+        .bind(&suspension_id)
+        .execute(pool)
+        .await;
     }
 }

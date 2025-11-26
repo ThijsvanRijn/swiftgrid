@@ -30,12 +30,14 @@
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
 	import CodeExecutionNodeComponent from '$lib/components/nodes/CodeExecutionNode.svelte';
 	import DelayNodeComponent from '$lib/components/nodes/DelayNode.svelte';
+	import WebhookWaitNodeComponent from '$lib/components/nodes/WebhookWaitNode.svelte';
 	import FlowInit from '$lib/components/FlowInit.svelte';
 
 	const nodeTypes = {
 		'http-request': HttpRequestNodeComponent,
 		'code-execution': CodeExecutionNodeComponent,
-		'delay': DelayNodeComponent
+		'delay': DelayNodeComponent,
+		'webhook-wait': WebhookWaitNodeComponent
 	};
 
 	// Local UI state
@@ -99,7 +101,7 @@
 		return screenPointToFlowPosition(centerScreenPoint);
 	}
 
-	function handleAddNode(type: 'http' | 'code' | 'delay') {
+	function handleAddNode(type: 'http' | 'code' | 'delay' | 'webhook-wait') {
 		const position = getCanvasCenterPosition() ?? undefined;
 		flowStore.addNode(type, position);
 	}
@@ -132,6 +134,7 @@
 			onAddHttpNode={() => handleAddNode('http')}
 			onAddCodeNode={() => handleAddNode('code')}
 			onAddDelayNode={() => handleAddNode('delay')}
+			onAddWebhookWaitNode={() => handleAddNode('webhook-wait')}
 			onSave={saveFlow}
 			onRun={runFlow}
 		/>

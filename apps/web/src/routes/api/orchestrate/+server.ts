@@ -255,6 +255,22 @@ function buildJobFromNode(
         };
     }
     
+    if (node.type === 'webhook-wait') {
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'WEBHOOK_WAIT',
+                data: {
+                    description: node.data.webhookDescription || 'Wait for webhook',
+                    timeout_ms: node.data.webhookTimeoutMs || (7 * 24 * 60 * 60 * 1000)
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
+        };
+    }
+    
     return null;
 }
 

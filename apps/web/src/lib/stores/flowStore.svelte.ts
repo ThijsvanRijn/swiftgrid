@@ -70,7 +70,7 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 }
 
 // Adds a new node at the given position (or random fallback)
-function addNode(type: 'http' | 'code' | 'delay', position?: { x: number; y: number }) {
+function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait', position?: { x: number; y: number }) {
 	const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
 
 	let newNode: AppNode;
@@ -98,8 +98,7 @@ function addNode(type: 'http' | 'code' | 'delay', position?: { x: number; y: num
 			},
 			position: position ?? fallbackPosition
 		};
-	} else {
-		// Delay node
+	} else if (type === 'delay') {
 		newNode = {
 			id: generateId(),
 			type: 'delay',
@@ -107,6 +106,19 @@ function addNode(type: 'http' | 'code' | 'delay', position?: { x: number; y: num
 				label: 'Wait',
 				delayMs: 5000,  // Default 5 seconds
 				delayStr: '5s',
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else {
+		// Webhook Wait node
+		newNode = {
+			id: generateId(),
+			type: 'webhook-wait',
+			data: {
+				label: 'Webhook Wait',
+				webhookDescription: 'Wait for external event',
+				webhookTimeoutMs: 7 * 24 * 60 * 60 * 1000,  // Default 7 days
 				status: 'idle'
 			},
 			position: position ?? fallbackPosition

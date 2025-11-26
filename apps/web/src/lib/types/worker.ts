@@ -40,11 +40,23 @@ export interface HttpNodeData {
 	body?: any;
 }
 
+export interface WebhookResumeData {
+	resume_token: string;
+	payload: any;
+}
+
+export interface WebhookWaitData {
+	description?: string;
+	timeout_ms: number;
+}
+
 export type NodeType = 
 	| { type: "HTTP", data: HttpNodeData }
 	| { type: "CODE", data: CodeNodeData }
 	| { type: "DELAY", data: DelayNodeData }
-	| { type: "DELAYRESUME", data: DelayResumeData };
+	| { type: "DELAYRESUME", data: DelayResumeData }
+	| { type: "WEBHOOKWAIT", data: WebhookWaitData }
+	| { type: "WEBHOOKRESUME", data: WebhookResumeData };
 
 export interface WorkerJob {
 	id: string;
