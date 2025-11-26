@@ -8,8 +8,22 @@ export const APP_NAME = 'SwiftGrid';
 export const REDIS_STREAMS = {
     JOBS: 'swiftgrid_stream',
     RESULTS: 'swiftgrid_results',
+    CHUNKS: 'swiftgrid_chunks',   // Real-time streaming output
     DELAYED: 'swiftgrid_delayed'  // Sorted set for delayed jobs
 } as const;
+
+// =============================================================================
+// STREAM CHUNK TYPES - For real-time output streaming
+// =============================================================================
+export const CHUNK_TYPES = {
+    PROGRESS: 'progress',  // Status updates ("Connecting...", "Processing...")
+    DATA: 'data',          // Partial response data (HTTP chunks)
+    TOKEN: 'token',        // LLM tokens (for AI streaming)
+    ERROR: 'error',        // Error messages during streaming
+    COMPLETE: 'complete'   // Final chunk marker
+} as const;
+
+export type ChunkType = typeof CHUNK_TYPES[keyof typeof CHUNK_TYPES];
 
 // =============================================================================
 // EVENT TYPES - Used by both worker and orchestrator

@@ -3,7 +3,7 @@ import { env } from '$env/dynamic/private';
 import { REDIS_STREAMS } from '@swiftgrid/shared';
 
 const HEARTBEAT_INTERVAL_MS = 30000; // Send heartbeat every 30s
-const REDIS_BLOCK_MS = 10000; // Block for 10s waiting for data
+const REDIS_BLOCK_MS = 5000; // Block for 5s waiting for data (shorter for better chunk responsiveness)
 
 export function GET() {
     const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
@@ -30,26 +30,45 @@ export function GET() {
                 }
             }, HEARTBEAT_INTERVAL_MS);
 
-            // Listen for new messages only ($ = latest)
-            let lastId = '$';
+            // Listen for new messages on both streams ($ = latest)
+            let lastResultsId = '$';
+            let lastChunksId = '$';
             let errorCount = 0;
             const MAX_ERRORS = 5;
 
             while (active) {
                 try {
-                    const result = await redis.xread('BLOCK', REDIS_BLOCK_MS, 'STREAMS', REDIS_STREAMS.RESULTS, lastId);
+                    // Listen to both RESULTS (node completions) and CHUNKS (streaming output)
+                    const result = await redis.xread(
+                        'BLOCK', REDIS_BLOCK_MS, 
+                        'STREAMS', 
+                        REDIS_STREAMS.RESULTS, REDIS_STREAMS.CHUNKS,
+                        lastResultsId, lastChunksId
+                    );
 
                     if (result) {
-                        const [, messages] = result[0];
-                        
-                        for (const message of messages) {
-                            const [id, fields] = message;
-                            lastId = id;
-                            
-                            const payloadIndex = fields.indexOf('payload');
-                            if (payloadIndex !== -1) {
-                                const jsonString = fields[payloadIndex + 1];
-                                controller.enqueue(`data: ${jsonString}\n\n`);
+                        for (const [streamName, messages] of result) {
+                            for (const message of messages) {
+                                const [id, fields] = message;
+                                
+                                // Update the appropriate lastId
+                                if (streamName === REDIS_STREAMS.RESULTS) {
+                                    lastResultsId = id;
+                                } else if (streamName === REDIS_STREAMS.CHUNKS) {
+                                    lastChunksId = id;
+                                }
+                                
+                                const payloadIndex = fields.indexOf('payload');
+                                if (payloadIndex !== -1) {
+                                    const jsonString = fields[payloadIndex + 1];
+                                    
+                                    // Use SSE event types to distinguish between results and chunks
+                                    if (streamName === REDIS_STREAMS.CHUNKS) {
+                                        controller.enqueue(`event: chunk\ndata: ${jsonString}\n\n`);
+                                    } else {
+                                        controller.enqueue(`event: result\ndata: ${jsonString}\n\n`);
+                                    }
+                                }
                             }
                         }
                     }

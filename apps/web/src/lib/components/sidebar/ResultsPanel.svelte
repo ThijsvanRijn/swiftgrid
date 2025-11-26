@@ -1,5 +1,56 @@
 <script lang="ts">
 	import { flowStore } from '$lib/stores/flowStore.svelte';
+	import { sseService, type StreamChunk } from '$lib/services/sseService';
+	import { onMount, onDestroy } from 'svelte';
+
+	// Streaming output state - keyed by node ID so we can show history
+	let chunksByNode = $state<Map<string, StreamChunk[]>>(new Map());
+	let streamingNodeId = $state<string | null>(null);
+
+	// Get chunks for the currently selected node
+	let currentChunks = $derived(
+		flowStore.selectedNode ? (chunksByNode.get(flowStore.selectedNode.id) ?? []) : []
+	);
+	let isStreaming = $derived(
+		flowStore.selectedNode?.id === streamingNodeId
+	);
+
+	// Subscribe to chunk events
+	onMount(() => {
+		sseService.setChunkCallback((chunk) => {
+			// Store chunks by node ID (so we keep history)
+			const existing = chunksByNode.get(chunk.node_id) ?? [];
+			
+			// If this is the first chunk for this node, clear old chunks
+			if (chunk.chunk_index === 0) {
+				chunksByNode.set(chunk.node_id, [chunk]);
+			} else {
+				chunksByNode.set(chunk.node_id, [...existing, chunk]);
+			}
+			
+			// Update streaming state
+			if (chunk.chunk_type === 'complete') {
+				streamingNodeId = null;
+			} else {
+				streamingNodeId = chunk.node_id;
+			}
+			
+			// Force reactivity
+			chunksByNode = new Map(chunksByNode);
+			
+			// Auto-scroll if viewing this node
+			if (flowStore.selectedNode?.id === chunk.node_id) {
+				setTimeout(() => {
+					const el = document.getElementById('streaming-output');
+					if (el) el.scrollTop = el.scrollHeight;
+				}, 10);
+			}
+		});
+	});
+
+	onDestroy(() => {
+		sseService.setChunkCallback(null);
+	});
 </script>
 
 {#if flowStore.selectedNode}
@@ -54,9 +105,50 @@
 				</div>
 			{/if}
 
+			<!-- Streaming output (shows during and after execution) -->
+			{#if currentChunks.length > 0}
+				<div class="flex flex-col gap-1">
+					<div class="flex items-center justify-between">
+						<span class="text-[10px] font-medium text-muted-foreground">Live Output</span>
+						{#if isStreaming}
+							<span class="flex items-center gap-1 text-[10px] text-blue-500">
+								<span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+								Streaming
+							</span>
+						{:else}
+							<span class="text-[10px] text-muted-foreground/50">
+								{currentChunks.length} events
+							</span>
+						{/if}
+					</div>
+					<div 
+						id="streaming-output"
+						class="bg-[#0d1117] p-2 rounded-none text-[10px] font-mono max-h-[120px] overflow-y-auto border border-input"
+					>
+						{#each currentChunks as chunk}
+							<div class="flex items-start gap-2 py-0.5 {
+								chunk.chunk_type === 'error' ? 'text-red-400' :
+								chunk.chunk_type === 'progress' ? 'text-blue-400' :
+								chunk.chunk_type === 'complete' ? 'text-emerald-400' : 'text-gray-400'
+							}">
+								<span class="text-muted-foreground/50 select-none w-4 text-right shrink-0">{chunk.chunk_index}</span>
+								<span class="break-all">
+									{#if chunk.chunk_type === 'progress' && isStreaming && chunk === currentChunks[currentChunks.length - 1]}
+										<svg class="w-3 h-3 inline mr-1 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+										</svg>
+									{/if}
+									{chunk.content || (chunk.chunk_type === 'complete' ? '✓ Done' : '')}
+								</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
 			{#if flowStore.selectedNode.data.result}
 				<pre class="bg-[#0d1117] text-emerald-400 p-3 rounded-none text-xs font-mono overflow-x-auto max-h-[300px] overflow-y-auto">{JSON.stringify(flowStore.selectedNode.data.result, null, 2)}</pre>
-			{:else}
+			{:else if !isStreaming && currentChunks.length === 0}
 				<div class="py-8 px-4 border border-dashed border-input rounded-none text-center flex flex-col items-center gap-2">
 					<div class="w-10 h-10 rounded-full bg-sidebar-accent flex items-center justify-center">
 						<svg class="w-5 h-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

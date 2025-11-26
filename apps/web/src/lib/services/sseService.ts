@@ -10,16 +10,29 @@ interface ExecutionResult {
     duration_ms?: number;
 }
 
+// Streaming chunk type
+interface StreamChunk {
+    run_id: string;
+    node_id: string;
+    chunk_index: number;
+    chunk_type: 'progress' | 'data' | 'token' | 'error' | 'complete';
+    content: string;
+    timestamp: number;
+}
+
 // SSE connection state
 let eventSource: EventSource | null = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_MS = 2000;
 
-// Status callback for UI feedback
+// Callbacks
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 type StatusCallback = (status: ConnectionStatus) => void;
+type ChunkCallback = (chunk: StreamChunk) => void;
+
 let onStatusChange: StatusCallback | null = null;
+let onChunk: ChunkCallback | null = null;
 
 // Connects to the SSE stream with auto-reconnect
 function connect() {
@@ -37,15 +50,36 @@ function connect() {
         onStatusChange?.('connected');
     };
 
+    // Handle 'result' events (node completions)
+    eventSource.addEventListener('result', (event) => {
+        const result: ExecutionResult = JSON.parse(event.data);
+        const isSuccess = result.status_code >= 200 && result.status_code < 300;
+        
+        const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
+        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}`);
+        
+        handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+    });
+
+    // Handle 'chunk' events (streaming output)
+    eventSource.addEventListener('chunk', (event) => {
+        const chunk: StreamChunk = JSON.parse(event.data);
+        
+        // Always log chunks for debugging
+        console.log(`SSE CHUNK: [${chunk.node_id}] ${chunk.chunk_type}: ${chunk.content}`);
+        
+        // Notify listeners
+        onChunk?.(chunk);
+    });
+
+    // Fallback for unnamed events (backwards compatibility)
     eventSource.onmessage = (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
         
-        // Log with duration if available
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}`);
         
-        // Pass run_id to handler for proper orchestration
         handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
     };
 
@@ -82,6 +116,11 @@ function setStatusCallback(callback: StatusCallback | null) {
     onStatusChange = callback;
 }
 
+// Sets a callback for streaming chunks
+function setChunkCallback(callback: ChunkCallback | null) {
+    onChunk = callback;
+}
+
 // Checks if currently connected
 function isConnected() {
     return eventSource?.readyState === EventSource.OPEN;
@@ -91,6 +130,10 @@ export const sseService = {
     connect,
     disconnect,
     setStatusCallback,
+    setChunkCallback,
     isConnected
 };
+
+// Export types for consumers
+export type { StreamChunk };
 

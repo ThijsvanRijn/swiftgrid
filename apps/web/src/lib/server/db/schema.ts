@@ -140,6 +140,35 @@ export const suspensions = pgTable('suspensions', {
 ]);
 
 // =============================================================================
+// RUN STREAM CHUNKS - Real-time streaming output (for LLMs, progress, etc.)
+// =============================================================================
+// Chunk types:
+//   'progress' - Status updates ("Connecting...", "Processing...")
+//   'data' - Partial response data (HTTP chunks)
+//   'token' - LLM tokens (for AI streaming)
+//   'error' - Error messages during streaming
+export const runStreamChunks = pgTable('run_stream_chunks', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  runId: uuid('run_id').references(() => workflowRuns.id).notNull(),
+  nodeId: text('node_id').notNull(),
+  
+  // Sequential index for ordering chunks
+  chunkIndex: integer('chunk_index').notNull(),
+  
+  // Type of chunk (progress, data, token, error)
+  chunkType: text('chunk_type').notNull(),
+  
+  // The actual content
+  content: text('content').notNull(),
+  
+  // Timestamp for replay
+  createdAt: timestamp('created_at').defaultNow().notNull()
+}, (table) => [
+  index('idx_stream_chunks_run_node').on(table.runId, table.nodeId),
+  index('idx_stream_chunks_order').on(table.runId, table.nodeId, table.chunkIndex)
+]);
+
+// =============================================================================
 // WEBHOOK DELIVERIES - For idempotency and audit trail
 // =============================================================================
 export const webhookDeliveries = pgTable('webhook_deliveries', {

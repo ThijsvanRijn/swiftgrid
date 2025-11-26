@@ -186,6 +186,91 @@ async fn log_event(
     Ok(())
 }
 
+// =============================================================================
+// STREAMING OUTPUT - Real-time chunks to Redis + PostgreSQL
+// =============================================================================
+
+const STREAM_CHUNKS: &str = "swiftgrid_chunks";
+
+#[derive(Clone)]
+struct StreamContext {
+    redis: redis::Client,
+    pool: PgPool,
+    run_id: Uuid,
+    node_id: String,
+    chunk_index: Arc<AtomicUsize>,
+}
+
+impl StreamContext {
+    fn new(redis: redis::Client, pool: PgPool, run_id: Uuid, node_id: String) -> Self {
+        Self {
+            redis,
+            pool,
+            run_id,
+            node_id,
+            chunk_index: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+    
+    /// Send a streaming chunk to both Redis (real-time) and PostgreSQL (persistence)
+    async fn send_chunk(&self, chunk_type: &str, content: &str) {
+        let index = self.chunk_index.fetch_add(1, Ordering::SeqCst);
+        
+        // 1. Publish to Redis for real-time SSE
+        let chunk_payload = serde_json::json!({
+            "run_id": self.run_id.to_string(),
+            "node_id": self.node_id,
+            "chunk_index": index,
+            "chunk_type": chunk_type,
+            "content": content,
+            "timestamp": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        });
+        
+        if let Ok(mut con) = self.redis.get_multiplexed_async_connection().await {
+            let _: RedisResult<()> = con.xadd(
+                STREAM_CHUNKS,
+                "*",
+                &[("payload", serde_json::to_string(&chunk_payload).unwrap_or_default())]
+            ).await;
+        }
+        
+        // 2. Persist to PostgreSQL for replay
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO run_stream_chunks (run_id, node_id, chunk_index, chunk_type, content)
+            VALUES ($1, $2, $3, $4, $5)
+            "#
+        )
+        .bind(&self.run_id)
+        .bind(&self.node_id)
+        .bind(index as i32)
+        .bind(chunk_type)
+        .bind(content)
+        .execute(&self.pool)
+        .await;
+    }
+    
+    /// Convenience methods for different chunk types
+    async fn progress(&self, message: &str) {
+        self.send_chunk("progress", message).await;
+    }
+    
+    async fn data(&self, data: &str) {
+        self.send_chunk("data", data).await;
+    }
+    
+    async fn error(&self, error: &str) {
+        self.send_chunk("error", error).await;
+    }
+    
+    async fn complete(&self) {
+        self.send_chunk("complete", "").await;
+    }
+}
+
 #[allow(dead_code)] // Will be used by orchestrator in Phase 2
 async fn update_run_status(pool: &PgPool, run_id: &Uuid, status: &str) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now();
@@ -417,12 +502,17 @@ async fn process_job(
         let _ = log_event(&db_pool, rid, &job_id, EventType::NodeStarted, serde_json::json!({})).await;
     }
 
+    // Create streaming context for real-time output
+    let stream_ctx = run_id.as_ref().map(|rid| {
+        StreamContext::new(redis_client.clone(), db_pool.clone(), *rid, job_id.clone())
+    });
+
     // Clone node for potential retry (before we consume it in match)
     let node_clone = job.node.clone();
     
     // Execute the node
     let (status, body) = match job.node {
-        NodeType::Http(data) => execute_http(http_client, data).await,
+        NodeType::Http(data) => execute_http(http_client, data, stream_ctx.as_ref()).await,
         NodeType::Code(data) => {
             let (tx, rx) = oneshot::channel();
             let task = JsTask {
@@ -668,11 +758,22 @@ async fn process_job(
 }
 
 // =============================================================================
-// HTTP EXECUTOR
+// HTTP EXECUTOR (with streaming progress)
 // =============================================================================
 
-async fn execute_http(client: reqwest::Client, data: HttpNodeData) -> (u16, Option<serde_json::Value>) {
-    let reqwest_method: reqwest::Method = format!("{:?}", data.method).parse().unwrap();
+async fn execute_http(
+    client: reqwest::Client, 
+    data: HttpNodeData,
+    stream_ctx: Option<&StreamContext>
+) -> (u16, Option<serde_json::Value>) {
+    let method_str = format!("{:?}", data.method);
+    let reqwest_method: reqwest::Method = method_str.parse().unwrap();
+    
+    // Stream progress: starting
+    if let Some(ctx) = stream_ctx {
+        ctx.progress(&format!("{} {}", method_str, &data.url)).await;
+    }
+    
     let mut req = client.request(reqwest_method, &data.url);
     
     if let Some(h) = data.headers { 
@@ -684,20 +785,43 @@ async fn execute_http(client: reqwest::Client, data: HttpNodeData) -> (u16, Opti
         req = req.json(&b); 
     }
 
+    // Stream progress: sending
+    if let Some(ctx) = stream_ctx {
+        ctx.progress("Sending request...").await;
+    }
+
     match req.send().await {
         Ok(resp) => {
-            let s = resp.status().as_u16();
+            let status = resp.status().as_u16();
+            
+            // Stream progress: receiving
+            if let Some(ctx) = stream_ctx {
+                ctx.progress(&format!("Response: {} {}", status, resp.status().canonical_reason().unwrap_or(""))).await;
+            }
+            
             let text = resp.text().await.unwrap_or_default();
-            let b = match serde_json::from_str::<serde_json::Value>(&text) {
+            let body = match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(json) => Some(json),
                 Err(_) => if text.is_empty() { None } else { Some(serde_json::Value::String(text)) }
             };
-            (s, b)
+            
+            // Stream complete
+            if let Some(ctx) = stream_ctx {
+                ctx.complete().await;
+            }
+            
+            (status, body)
         },
         Err(e) => {
             let status = if e.is_timeout() { 408 } 
                 else if e.is_connect() { 503 } 
                 else { 500 };
+            
+            // Stream error
+            if let Some(ctx) = stream_ctx {
+                ctx.error(&e.to_string()).await;
+            }
+            
             (status, Some(serde_json::json!({ "error": e.to_string() })))
         }
     }
