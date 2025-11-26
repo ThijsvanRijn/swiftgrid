@@ -25,6 +25,7 @@
 	import Navbar from '$lib/components/Navbar.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
 	import CanvasToolbar from '$lib/components/CanvasToolbar.svelte';
+	import RunHistoryPanel from '$lib/components/RunHistoryPanel.svelte';
 
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -43,6 +44,13 @@
 	// Local UI state
 	let flowWrapper: HTMLDivElement | null = null;
 	let sseStatus = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
+	let historyPanelOpen = $state(false);
+
+	function handleViewRun(runId: string) {
+		// TODO: Navigate to run detail view
+		console.log('View run:', runId);
+		historyPanelOpen = false;
+	}
 
 	// =================================================
 	// EVENT HANDLERS
@@ -137,6 +145,7 @@
 			onAddWebhookWaitNode={() => handleAddNode('webhook-wait')}
 			onSave={saveFlow}
 			onRun={runFlow}
+			onOpenHistory={() => historyPanelOpen = true}
 		/>
 
 		<!-- Main content area with toolbar and sidebar -->
@@ -151,4 +160,11 @@
 			<Sidebar />
 		</div>
 	</div>
+
+	<!-- Run History Panel (slide-out) -->
+	<RunHistoryPanel 
+		isOpen={historyPanelOpen}
+		onClose={() => historyPanelOpen = false}
+		onViewRun={handleViewRun}
+	/>
 </div>

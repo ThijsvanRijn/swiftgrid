@@ -11,9 +11,10 @@
 		onAddWebhookWaitNode: () => void;
 		onSave: () => void;
 		onRun: () => void;
+		onOpenHistory: () => void;
 	}
 
-	let { sseStatus, onAddHttpNode, onAddCodeNode, onAddDelayNode, onAddWebhookWaitNode, onSave, onRun }: Props = $props();
+	let { sseStatus, onAddHttpNode, onAddCodeNode, onAddDelayNode, onAddWebhookWaitNode, onSave, onRun, onOpenHistory }: Props = $props();
 </script>
 
 <div class="bg-panel border border-panel-border rounded-none shadow-float pointer-events-auto px-4 py-2 flex items-center justify-between">
@@ -65,6 +66,18 @@
 		</button>
 
 		<div class="w-px h-5 bg-border mx-1"></div>
+
+		<!-- History button -->
+		<button
+			onclick={onOpenHistory}
+			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors flex items-center gap-1.5"
+		>
+			<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M12 8v4l3 3"/>
+				<circle cx="12" cy="12" r="10"/>
+			</svg>
+			History
+		</button>
 
 		<!-- Save button -->
 		<button

@@ -38,7 +38,7 @@ export const workflowRuns = pgTable('workflow_runs', {
   // Run status: pending → running → completed | failed | cancelled
   status: text('status').notNull().default('pending'),
   
-  // Trigger source: 'manual', 'webhook', 'schedule'
+  // Trigger source: 'manual', 'webhook', 'schedule', 'subflow'
   trigger: text('trigger').default('manual'),
   
   // Initial input data (e.g., webhook payload)
@@ -47,12 +47,16 @@ export const workflowRuns = pgTable('workflow_runs', {
   // Final output (optional, for quick access)
   outputData: jsonb('output_data'),
   
+  // Pinned runs are exempt from TTL cleanup
+  pinned: boolean('pinned').default(false),
+  
   createdAt: timestamp('created_at').defaultNow(),
   startedAt: timestamp('started_at'),
   completedAt: timestamp('completed_at')
 }, (table) => [
   index('idx_workflow_runs_status').on(table.status),
-  index('idx_workflow_runs_workflow_id').on(table.workflowId)
+  index('idx_workflow_runs_workflow_id').on(table.workflowId),
+  index('idx_workflow_runs_created').on(table.createdAt)
 ]);
 
 // =============================================================================
@@ -194,4 +198,31 @@ export const webhookDeliveries = pgTable('webhook_deliveries', {
 }, (table) => [
   index('idx_webhook_deliveries_idempotency').on(table.workflowId, table.idempotencyKey),
   index('idx_webhook_deliveries_workflow').on(table.workflowId)
+]);
+
+// =============================================================================
+// RUN AUDIT LOG - Tracks deletions and other audit events
+// =============================================================================
+// This table preserves audit trail even when runs are hard-deleted
+export const runAuditLog = pgTable('run_audit_log', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  
+  // Run that was affected (no FK - run may be deleted)
+  runId: uuid('run_id').notNull(),
+  workflowId: integer('workflow_id').notNull(),
+  
+  // Action type: 'DELETED', 'CANCELLED', etc.
+  action: text('action').notNull(),
+  
+  // Who performed the action (user ID or 'system')
+  actor: text('actor'),
+  
+  // Additional context (reason, original status, etc.)
+  metadata: jsonb('metadata'),
+  
+  createdAt: timestamp('created_at').defaultNow().notNull()
+}, (table) => [
+  index('idx_audit_log_run').on(table.runId),
+  index('idx_audit_log_workflow').on(table.workflowId),
+  index('idx_audit_log_action').on(table.action)
 ]);
