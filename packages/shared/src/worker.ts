@@ -8,7 +8,9 @@ export interface CodeNodeData {
 }
 
 export interface DelayNodeData {
+	/** Delay duration in milliseconds */
 	duration_ms: number;
+	/** Human-readable duration string: "5s", "2m", "1h" */
 	duration_str?: string;
 }
 
@@ -23,6 +25,7 @@ export interface ExecutionResult {
 	body: any;
 	timestamp: number;
 	duration_ms: number;
+	/** If true, frontend should not trigger downstream */
 	isolated?: boolean;
 }
 
@@ -42,30 +45,45 @@ export interface HttpNodeData {
 }
 
 export interface LlmMessage {
+	/** "system", "user", or "assistant" */
 	role: string;
 	content: string;
 }
 
 export interface LlmNodeData {
+	/** Base URL: "https://api.openai.com/v1" or custom */
 	base_url: string;
+	/** API key (can be {{$env.OPENAI_KEY}}) */
 	api_key: string;
+	/** Model name: "gpt-4o", "gpt-3.5-turbo", etc. */
 	model: string;
+	/** Conversation messages */
 	messages: LlmMessage[];
+	/** Temperature: 0.0 - 2.0 */
 	temperature?: number;
+	/** Max response tokens */
 	max_tokens?: number;
+	/** Enable streaming (default: false) */
 	stream?: boolean;
 }
 
 export interface RouterCondition {
+	/** Output handle ID */
 	id: string;
+	/** Display label (e.g., "Success", "Error") */
 	label: string;
+	/** JS expression: "value >= 200 && value < 300" */
 	expression: string;
 }
 
 export interface RouterNodeData {
+	/** Variable to evaluate: "{{node.status}}" */
 	route_by: string;
+	/** Conditions to check in order */
 	conditions: RouterCondition[];
+	/** Output if no conditions match */
 	default_output: string;
+	/** "first_match" or "broadcast" */
 	mode: string;
 }
 
@@ -75,7 +93,9 @@ export interface WebhookResumeData {
 }
 
 export interface WebhookWaitData {
+	/** Description shown to user: "Wait for payment confirmation" */
 	description?: string;
+	/** Timeout in milliseconds (default: 7 days) */
 	timeout_ms: number;
 }
 
@@ -90,11 +110,17 @@ export type NodeType =
 	| { type: "LLM", data: LlmNodeData };
 
 export interface WorkerJob {
+	/** Node ID */
 	id: string;
+	/** Run UUID (optional for backwards compat) */
 	run_id?: string;
+	/** The node to execute */
 	node: NodeType;
+	/** Current retry attempt (0-indexed) */
 	retry_count?: number;
+	/** Maximum retry attempts */
 	max_retries: number;
+	/** If true, don't trigger downstream nodes */
 	isolated?: boolean;
 }
 
