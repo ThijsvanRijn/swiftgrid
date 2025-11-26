@@ -29,11 +29,13 @@
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
 	import CodeExecutionNodeComponent from '$lib/components/nodes/CodeExecutionNode.svelte';
+	import DelayNodeComponent from '$lib/components/nodes/DelayNode.svelte';
 	import FlowInit from '$lib/components/FlowInit.svelte';
 
 	const nodeTypes = {
 		'http-request': HttpRequestNodeComponent,
-		'code-execution': CodeExecutionNodeComponent
+		'code-execution': CodeExecutionNodeComponent,
+		'delay': DelayNodeComponent
 	};
 
 	// Local UI state
@@ -97,7 +99,7 @@
 		return screenPointToFlowPosition(centerScreenPoint);
 	}
 
-	function handleAddNode(type: 'http' | 'code') {
+	function handleAddNode(type: 'http' | 'code' | 'delay') {
 		const position = getCanvasCenterPosition() ?? undefined;
 		flowStore.addNode(type, position);
 	}
@@ -129,6 +131,7 @@
 			{sseStatus}
 			onAddHttpNode={() => handleAddNode('http')}
 			onAddCodeNode={() => handleAddNode('code')}
+			onAddDelayNode={() => handleAddNode('delay')}
 			onSave={saveFlow}
 			onRun={runFlow}
 		/>

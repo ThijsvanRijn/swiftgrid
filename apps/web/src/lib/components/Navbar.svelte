@@ -7,11 +7,12 @@
 		sseStatus: ConnectionStatus;
 		onAddHttpNode: () => void;
 		onAddCodeNode: () => void;
+		onAddDelayNode: () => void;
 		onSave: () => void;
 		onRun: () => void;
 	}
 
-	let { sseStatus, onAddHttpNode, onAddCodeNode, onSave, onRun }: Props = $props();
+	let { sseStatus, onAddHttpNode, onAddCodeNode, onAddDelayNode, onSave, onRun }: Props = $props();
 </script>
 
 <div class="bg-panel border border-panel-border rounded-none shadow-float pointer-events-auto px-4 py-2 flex items-center justify-between">
@@ -48,6 +49,12 @@
 			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
 		>
 			+ Code
+		</button>
+		<button
+			onclick={onAddDelayNode}
+			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+		>
+			+ Delay
 		</button>
 
 		<div class="w-px h-5 bg-border mx-1"></div>

@@ -239,6 +239,22 @@ function buildJobFromNode(
         };
     }
     
+    if (node.type === 'delay') {
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'DELAY',
+                data: {
+                    duration_ms: node.data.delayMs || 5000,
+                    duration_str: node.data.delayStr
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
+        };
+    }
+    
     return null;
 }
 

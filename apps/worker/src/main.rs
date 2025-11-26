@@ -46,6 +46,24 @@ pub struct CodeNodeData {
     pub inputs: Option<serde_json::Value>,
 }
 
+// Delay node - waits for a specified duration
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DelayNodeData {
+    #[typeshare(serialized_as = "number")]
+    pub duration_ms: u64,           // Delay in milliseconds
+    #[serde(default)]
+    pub duration_str: Option<String>, // Human-readable: "5s", "2m", "1h"
+}
+
+// Resume after a scheduled delay
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DelayResumeData {
+    #[typeshare(serialized_as = "number")]
+    pub original_delay_ms: u64,
+}
+
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
@@ -53,6 +71,8 @@ pub struct CodeNodeData {
 pub enum NodeType {
     Http(HttpNodeData),
     Code(CodeNodeData),
+    Delay(DelayNodeData),
+    DelayResume(DelayResumeData),
 }
 
 // Enhanced job with run context and retry metadata
@@ -82,6 +102,7 @@ pub struct ExecutionResult {
     pub body: Option<serde_json::Value>,
     #[typeshare(serialized_as = "number")]
     pub timestamp: u64,
+    #[typeshare(serialized_as = "number")]
     pub duration_ms: u64,
 }
 
@@ -258,6 +279,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let in_flight = Arc::new(AtomicUsize::new(0));
 
+    // Spawn the scheduler loop (checks for delayed jobs ready to run)
+    let scheduler_redis = redis_client.clone();
+    tokio::spawn(async move {
+        scheduler_loop(scheduler_redis).await;
+    });
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -386,6 +413,62 @@ async fn process_job(
                     Err(_) => (500, Some(serde_json::json!({"error": "JS execution timeout (30s)"})))
                 }
             }
+        }
+        NodeType::Delay(data) => {
+            // For short delays (<60s), sleep inline
+            // For longer delays, schedule via Redis ZSET (handled by scheduler)
+            let delay_ms = data.duration_ms;
+            
+            if delay_ms <= 60_000 {
+                // Short delay: sleep inline (keeps the worker busy but simpler)
+                println!("  → Sleeping for {}ms", delay_ms);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                (200, Some(serde_json::json!({
+                    "delayed_ms": delay_ms,
+                    "message": format!("Delayed for {}ms", delay_ms)
+                })))
+            } else {
+                // Long delay: schedule for later via Redis ZSET
+                let resume_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64 + delay_ms;
+                
+                // Create a "resume" job that will be picked up by the scheduler
+                let resume_job = serde_json::json!({
+                    "id": job_id,
+                    "run_id": job.run_id,
+                    "node": { "type": "DELAY_RESUME", "data": { "original_delay_ms": delay_ms } },
+                    "retry_count": 0,
+                    "max_retries": 0
+                });
+                
+                if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+                    let _: RedisResult<()> = con.zadd(
+                        "swiftgrid_delayed",
+                        serde_json::to_string(&resume_job).unwrap(),
+                        resume_at as f64
+                    ).await;
+                }
+                
+                println!("  → Scheduled delay for {}ms (resume at {})", delay_ms, resume_at);
+                
+                // Return immediately - the scheduler will handle completion
+                // We need to NOT publish a result yet, so we use a special status
+                (202, Some(serde_json::json!({
+                    "scheduled": true,
+                    "resume_at": resume_at,
+                    "delayed_ms": delay_ms
+                })))
+            }
+        }
+        NodeType::DelayResume(data) => {
+            // This is called by the scheduler when a delay has elapsed
+            println!("  → Delay resumed after {}ms", data.original_delay_ms);
+            (200, Some(serde_json::json!({
+                "delayed_ms": data.original_delay_ms,
+                "message": format!("Delay completed after {}ms", data.original_delay_ms)
+            })))
         }
     };
 
@@ -544,4 +627,57 @@ async fn run_js_safely(
             Err(e) => Err(format!("JS Error: {}", e))
         }
     })).await
+}
+
+// =============================================================================
+// SCHEDULER LOOP - Moves delayed jobs to active queue when ready
+// =============================================================================
+
+async fn scheduler_loop(redis_client: redis::Client) {
+    println!("Scheduler started (polling every 1s for delayed jobs)");
+    
+    let poll_interval = Duration::from_secs(1);
+    
+    loop {
+        if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as f64;
+            
+            // Get all jobs that are ready (score <= now)
+            let ready_jobs: Vec<String> = match con.zrangebyscore_limit(
+                "swiftgrid_delayed",
+                "-inf",
+                now,
+                0,
+                10  // Process up to 10 at a time
+            ).await {
+                Ok(jobs) => jobs,
+                Err(e) => {
+                    eprintln!("Scheduler: Failed to query delayed jobs: {}", e);
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
+                }
+            };
+            
+            if !ready_jobs.is_empty() {
+                println!("Scheduler: Found {} delayed job(s) ready to run", ready_jobs.len());
+                
+                for job_json in &ready_jobs {
+                    // Remove from ZSET
+                    let _: RedisResult<()> = con.zrem("swiftgrid_delayed", job_json).await;
+                    
+                    // Add to active queue
+                    let _: RedisResult<String> = con.xadd(
+                        "swiftgrid_stream",
+                        "*",
+                        &[("payload", job_json.as_str())]
+                    ).await;
+                }
+            }
+        }
+        
+        tokio::time::sleep(poll_interval).await;
+    }
 }

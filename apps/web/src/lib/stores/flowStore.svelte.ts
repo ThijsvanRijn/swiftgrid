@@ -70,22 +70,48 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 }
 
 // Adds a new node at the given position (or random fallback)
-function addNode(type: 'http' | 'code', position?: { x: number; y: number }) {
-	const isHttp = type === 'http';
+function addNode(type: 'http' | 'code' | 'delay', position?: { x: number; y: number }) {
 	const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
 
-	const newNode: AppNode = {
-		id: generateId(),
-		type: isHttp ? 'http-request' : 'code-execution',
-		data: {
-			label: isHttp ? 'New Request' : 'JS Logic',
-			url: isHttp ? '' : undefined,
-			method: isHttp ? 'GET' : undefined,
-			code: isHttp ? undefined : 'return { result: "Hello World" };',
-			status: 'idle'
-		},
-		position: position ?? fallbackPosition
-	};
+	let newNode: AppNode;
+
+	if (type === 'http') {
+		newNode = {
+			id: generateId(),
+			type: 'http-request',
+			data: {
+				label: 'New Request',
+				url: '',
+				method: 'GET',
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else if (type === 'code') {
+		newNode = {
+			id: generateId(),
+			type: 'code-execution',
+			data: {
+				label: 'JS Logic',
+				code: 'return { result: "Hello World" };',
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else {
+		// Delay node
+		newNode = {
+			id: generateId(),
+			type: 'delay',
+			data: {
+				label: 'Wait',
+				delayMs: 5000,  // Default 5 seconds
+				delayStr: '5s',
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	}
 
 	nodes = [...nodes, newNode];
 	autoSaveService.triggerSave();

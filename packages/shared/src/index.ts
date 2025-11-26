@@ -7,7 +7,8 @@ export const APP_NAME = 'SwiftGrid';
 // Redis stream names
 export const REDIS_STREAMS = {
     JOBS: 'swiftgrid_stream',
-    RESULTS: 'swiftgrid_results'
+    RESULTS: 'swiftgrid_results',
+    DELAYED: 'swiftgrid_delayed'  // Sorted set for delayed jobs
 } as const;
 
 // =============================================================================

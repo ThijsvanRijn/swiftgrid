@@ -14,6 +14,10 @@ export type AppNodeData = {
     code?: string; // JS
     inputs?: any; // JSON Object mapping
 
+    // Delay Node Fields
+    delayMs?: number;      // Delay in milliseconds
+    delayStr?: string;     // Human-readable: "5s", "2m", "1h"
+
     // UI State fields (Shared)
     status?: 'idle' | 'running' | 'success' | 'error';
     result?: any;
