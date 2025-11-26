@@ -181,16 +181,26 @@
     }
   }
 
-  // Load runs when panel opens
+  // Load runs when panel opens + auto-refresh every 3s
   $effect(() => {
     if (isOpen) {
       loadRuns();
+      
+      // Auto-refresh while panel is open
+      const interval = setInterval(() => {
+        // Only refresh if not currently loading (avoid stacking requests)
+        if (!loading) {
+          loadRuns();
+        }
+      }, 3000);
+      
+      return () => clearInterval(interval);
     }
   });
 
   // Reload when filters change
   $effect(() => {
-    if (isOpen) {
+    if (isOpen && (statusFilter || triggerFilter)) {
       // Use a small timeout to batch filter changes
       const timer = setTimeout(() => loadRuns(), 100);
       return () => clearTimeout(timer);
