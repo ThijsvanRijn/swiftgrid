@@ -23,8 +23,9 @@ export async function loadLatestFlow() {
 			const graph = data.graph as any;
 			const hasViewport = graph.viewport && (graph.viewport.x !== 0 || graph.viewport.y !== 0 || graph.viewport.zoom !== 1);
 			
-			flowStore.setFlow(graph.nodes || [], graph.edges || [], graph.viewport);
-			console.log('Flow loaded from DB!');
+			// Pass the workflow ID and name to the store
+			flowStore.setFlow(graph.nodes || [], graph.edges || [], graph.viewport, data.id, data.name);
+			console.log('Flow loaded from DB! (id:', data.id, ', name:', data.name, ')');
 			
 			// If no meaningful viewport was saved, trigger fitView
 			if (!hasViewport && onNeedFitView) {

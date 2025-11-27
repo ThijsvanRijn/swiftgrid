@@ -152,6 +152,47 @@
   body {
     @apply bg-background text-foreground;
   }
+  
+  /* Custom scrollbar styling */
+  /* Light mode */
+  :root {
+    --scrollbar-thumb: oklch(0.81 0.01 255.67);
+    --scrollbar-track: oklch(0.93 0 0);
+  }
+  
+  /* Dark mode */
+  .dark {
+    --scrollbar-thumb: oklch(0.41 0 0);
+    --scrollbar-track: oklch(0.24 0 0);
+  }
+  
+  /* Modern browsers (Firefox, Chrome 121+) */
+  * {
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+  
+  /* Webkit browsers (Chrome, Safari, Edge) */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 4px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(from var(--scrollbar-thumb) calc(l + 0.1) c h);
+  }
+  
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.45 0.03 260);
+  }
 }
 
 /* SvelteFlow overrides - prevent background color changes */

@@ -26,6 +26,7 @@
 	import Sidebar from '$lib/components/Sidebar.svelte';
 	import CanvasToolbar from '$lib/components/CanvasToolbar.svelte';
 	import RunHistoryPanel from '$lib/components/RunHistoryPanel.svelte';
+	import SchedulePanel from '$lib/components/SchedulePanel.svelte';
 
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -49,11 +50,72 @@
 	let flowWrapper: HTMLDivElement | null = null;
 	let sseStatus = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
 	let historyPanelOpen = $state(false);
+	let schedulePanelOpen = $state(false);
+
+	// Schedule configuration (loaded from flowStore)
+	let scheduleConfig = $state({
+		enabled: false,
+		cron: '0 9 * * 1-5',
+		timezone: 'UTC',
+		inputData: '{}',
+		overlapMode: 'skip' as 'skip' | 'queue_one' | 'parallel',
+		nextRun: undefined as string | undefined
+	});
 
 	function handleViewRun(runId: string) {
 		// TODO: Navigate to run detail view
 		console.log('View run:', runId);
 		historyPanelOpen = false;
+	}
+
+	async function handleSaveSchedule(newSchedule: { enabled: boolean; cron: string; timezone: string; inputData: string; overlapMode: 'skip' | 'queue_one' | 'parallel'; nextRun?: string }) {
+		scheduleConfig = { ...newSchedule, nextRun: newSchedule.nextRun };
+		
+		// Save to backend
+		try {
+			const response = await fetch('/api/flows/schedule', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					workflowId: flowStore.workflowId,
+					enabled: newSchedule.enabled,
+					cron: newSchedule.cron,
+					timezone: newSchedule.timezone,
+					inputData: newSchedule.inputData,
+					overlapMode: newSchedule.overlapMode
+				})
+			});
+			
+			if (response.ok) {
+				const data = await response.json();
+				if (data.nextRun) {
+					scheduleConfig.nextRun = data.nextRun;
+				}
+			}
+		} catch (error) {
+			console.error('Failed to save schedule:', error);
+		}
+	}
+
+	async function loadSchedule() {
+		if (!flowStore.workflowId) return;
+		
+		try {
+			const response = await fetch(`/api/flows/schedule?workflowId=${flowStore.workflowId}`);
+			if (response.ok) {
+				const data = await response.json();
+				scheduleConfig = {
+					enabled: data.enabled ?? false,
+					cron: data.cron ?? '0 9 * * 1-5',
+					timezone: data.timezone ?? 'UTC',
+					inputData: data.inputData ?? '{}',
+					overlapMode: data.overlapMode ?? 'skip',
+					nextRun: data.nextRun
+				};
+			}
+		} catch (error) {
+			console.error('Failed to load schedule:', error);
+		}
 	}
 
 	// =================================================
@@ -74,7 +136,7 @@
 
 	onMount(() => {
 		themeStore.init();
-		loadLatestFlow();
+		loadLatestFlow().then(() => loadSchedule());
 		secretsStore.load();
 
 		sseService.setStatusCallback((status) => {
@@ -152,6 +214,8 @@
 			onSave={saveFlow}
 			onRun={runFlow}
 			onOpenHistory={() => historyPanelOpen = true}
+			onOpenSchedule={() => schedulePanelOpen = true}
+			scheduleEnabled={scheduleConfig.enabled}
 		/>
 
 		<!-- Main content area with toolbar and sidebar -->
@@ -159,18 +223,33 @@
 			<!-- Left: Canvas toolbar -->
 			<CanvasToolbar />
 			
-			<!-- Spacer to push sidebar right -->
+			<!-- Spacer to push panels right -->
 			<div class="grow"></div>
 			
-			<!-- Right: Floating sidebar -->
-			<Sidebar />
+			<!-- Right side panels -->
+			<div class="flex gap-3 h-full">
+				<!-- Schedule Panel -->
+				<SchedulePanel
+					isOpen={schedulePanelOpen}
+					onClose={() => schedulePanelOpen = false}
+					schedule={scheduleConfig}
+					onSave={handleSaveSchedule}
+					workflowId={flowStore.workflowId}
+					workflowName={flowStore.workflowName}
+				/>
+
+				<!-- Run History Panel -->
+				<RunHistoryPanel 
+					isOpen={historyPanelOpen}
+					onClose={() => historyPanelOpen = false}
+					onViewRun={handleViewRun}
+					workflowId={flowStore.workflowId}
+					workflowName={flowStore.workflowName}
+				/>
+
+				<!-- Node Config Sidebar (shows when node selected) -->
+				<Sidebar />
+			</div>
 		</div>
 	</div>
-
-	<!-- Run History Panel (slide-out) -->
-	<RunHistoryPanel 
-		isOpen={historyPanelOpen}
-		onClose={() => historyPanelOpen = false}
-		onViewRun={handleViewRun}
-	/>
 </div>

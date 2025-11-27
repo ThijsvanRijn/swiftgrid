@@ -23,6 +23,10 @@ let nodes = $state.raw<AppNode[]>([
 let edges = $state.raw<Edge[]>([]);
 let viewport = $state.raw<Viewport>({ x: 0, y: 0, zoom: 1 });
 
+// Workflow metadata
+let workflowId = $state<number | null>(null);
+let workflowName = $state<string | null>(null);
+
 // Selection state
 let selectedNodeId = $state<string | null>(null);
 
@@ -178,11 +182,17 @@ function getNode(id: string) {
 }
 
 // Replace entire flow state (used when loading from DB)
-function setFlow(newNodes: AppNode[], newEdges: Edge[], newViewport?: Viewport) {
+function setFlow(newNodes: AppNode[], newEdges: Edge[], newViewport?: Viewport, id?: number, name?: string) {
 	nodes = newNodes;
 	edges = newEdges;
 	if (newViewport) {
 		viewport = newViewport;
+	}
+	if (id !== undefined) {
+		workflowId = id;
+	}
+	if (name !== undefined) {
+		workflowName = name;
 	}
 }
 
@@ -192,6 +202,8 @@ export const flowStore = {
 	get nodes() { return nodes; },
 	get edges() { return edges; },
 	get viewport() { return viewport; },
+	get workflowId() { return workflowId; },
+	get workflowName() { return workflowName; },
 	get selectedNodeId() { return selectedNodeId; },
 	get selectedNode() { return selectedNode; },
 

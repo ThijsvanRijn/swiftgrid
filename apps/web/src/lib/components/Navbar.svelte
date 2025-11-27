@@ -3,6 +3,14 @@
 
 	type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 
+	interface ActiveSchedule {
+		workflowId: number;
+		workflowName: string;
+		cron: string;
+		timezone: string;
+		nextRun: string | null;
+	}
+
 	interface Props {
 		sseStatus: ConnectionStatus;
 		onAddHttpNode: () => void;
@@ -14,9 +22,49 @@
 		onSave: () => void;
 		onRun: () => void;
 		onOpenHistory: () => void;
+		onOpenSchedule: () => void;
+		scheduleEnabled?: boolean;
 	}
 
-	let { sseStatus, onAddHttpNode, onAddCodeNode, onAddDelayNode, onAddWebhookWaitNode, onAddRouterNode, onAddLlmNode, onSave, onRun, onOpenHistory }: Props = $props();
+	let { sseStatus, onAddHttpNode, onAddCodeNode, onAddDelayNode, onAddWebhookWaitNode, onAddRouterNode, onAddLlmNode, onSave, onRun, onOpenHistory, onOpenSchedule, scheduleEnabled = false }: Props = $props();
+
+	// Active schedules state
+	let activeSchedules = $state<ActiveSchedule[]>([]);
+	let showScheduleDropdown = $state(false);
+
+	// Load active schedules
+	async function loadActiveSchedules() {
+		try {
+			const res = await fetch('/api/schedules/active');
+			const data = await res.json();
+			if (res.ok) {
+				activeSchedules = data.schedules || [];
+			}
+		} catch (e) {
+			console.error('Failed to load active schedules:', e);
+		}
+	}
+
+	// Load on mount and refresh periodically
+	$effect(() => {
+		loadActiveSchedules();
+		const interval = setInterval(loadActiveSchedules, 10000); // Refresh every 10s
+		return () => clearInterval(interval);
+	});
+
+	// Format next run time
+	function formatNextRun(nextRun: string | null): string {
+		if (!nextRun) return 'Unknown';
+		const date = new Date(nextRun);
+		const now = new Date();
+		const diff = date.getTime() - now.getTime();
+		
+		if (diff < 0) return 'Overdue';
+		if (diff < 60000) return 'In < 1 min';
+		if (diff < 3600000) return `In ${Math.round(diff / 60000)} min`;
+		if (diff < 86400000) return `In ${Math.round(diff / 3600000)}h`;
+		return date.toLocaleDateString();
+	}
 </script>
 
 <div class="bg-panel border border-panel-border rounded-none shadow-float pointer-events-auto px-4 py-2 flex items-center justify-between">
@@ -80,6 +128,61 @@
 		</button>
 
 		<div class="w-px h-5 bg-border mx-1"></div>
+
+		<!-- Schedule button with global indicator -->
+		<div class="relative">
+			<button
+				onclick={onOpenSchedule}
+				onmouseenter={() => showScheduleDropdown = true}
+				onmouseleave={() => showScheduleDropdown = false}
+				class="px-3 py-1.5 text-xs font-medium rounded-none transition-colors flex items-center gap-1.5 {scheduleEnabled ? 'text-amber-500 hover:text-amber-400 hover:bg-amber-500/10' : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'}"
+			>
+				<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<circle cx="12" cy="12" r="10"/>
+					<path d="M12 6v6l4 2"/>
+				</svg>
+				Schedule
+				{#if activeSchedules.length > 0}
+					<span class="min-w-[18px] h-[18px] flex items-center justify-center text-[10px] font-semibold bg-amber-500 text-amber-950 rounded-full px-1">
+						{activeSchedules.length}
+					</span>
+				{:else if scheduleEnabled}
+					<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+				{/if}
+			</button>
+
+			<!-- Dropdown showing active schedules -->
+			{#if showScheduleDropdown && activeSchedules.length > 0}
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div 
+					class="absolute top-full right-0 mt-1 w-72 bg-panel border border-panel-border shadow-float z-50"
+					onmouseenter={() => showScheduleDropdown = true}
+					onmouseleave={() => showScheduleDropdown = false}
+				>
+					<div class="px-3 py-2 border-b border-panel-border">
+						<span class="text-xs font-medium">Active Schedules ({activeSchedules.length})</span>
+					</div>
+					<div class="max-h-64 overflow-y-auto">
+						{#each activeSchedules as schedule}
+							<div class="px-3 py-2 border-b border-panel-border/50 last:border-b-0 hover:bg-sidebar-accent/30">
+								<div class="flex items-center justify-between">
+									<span class="text-xs font-medium truncate max-w-[180px]">{schedule.workflowName}</span>
+									<span class="text-[10px] text-muted-foreground">#{schedule.workflowId}</span>
+								</div>
+								<div class="flex items-center gap-2 mt-1">
+									<code class="text-[10px] text-muted-foreground bg-sidebar-accent/50 px-1 py-0.5 rounded-sm">
+										{schedule.cron}
+									</code>
+									<span class="text-[10px] text-amber-500">
+										{formatNextRun(schedule.nextRun)}
+									</span>
+								</div>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
 
 		<!-- History button -->
 		<button

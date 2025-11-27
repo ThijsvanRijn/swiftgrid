@@ -211,6 +211,24 @@ async fn process_job(
     let job_isolated = job.isolated;
     let run_id = job.run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
 
+    // Check if run is still active before processing
+    if let Some(ref rid) = run_id {
+        let status_result: Result<Option<(String,)>, _> = sqlx::query_as(
+            "SELECT status FROM workflow_runs WHERE id = $1"
+        )
+        .bind(rid)
+        .fetch_optional(&db_pool)
+        .await;
+        
+        if let Ok(Some((status,))) = status_result {
+            if status == "cancelled" || status == "failed" {
+                println!("  → Skipping node {} - run {} is {}", job_id, rid, status);
+                ack_message(&redis_client, &group_name, &msg_id).await;
+                return;
+            }
+        }
+    }
+
     // Log NODE_STARTED event
     if let Some(ref rid) = run_id {
         let _ = log_event(&db_pool, rid, &job_id, EventType::NodeStarted, serde_json::json!({})).await;
