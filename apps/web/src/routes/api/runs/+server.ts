@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/server/db/index';
-import { workflowRuns, runEvents, runAuditLog } from '$lib/server/db/schema';
+import { workflowRuns, runEvents, workflows } from '$lib/server/db/schema';
 import { desc, eq, and, sql, inArray } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 
@@ -50,10 +50,11 @@ export const GET: RequestHandler = async ({ url }) => {
       }
     }
 
-    // Query runs
+    // Query runs with workflow name
     const runs = await db.select({
       id: workflowRuns.id,
       workflowId: workflowRuns.workflowId,
+      workflowName: workflows.name,
       status: workflowRuns.status,
       trigger: workflowRuns.trigger,
       pinned: workflowRuns.pinned,
@@ -64,6 +65,7 @@ export const GET: RequestHandler = async ({ url }) => {
       completedAt: workflowRuns.completedAt,
     })
       .from(workflowRuns)
+      .leftJoin(workflows, eq(workflowRuns.workflowId, workflows.id))
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(workflowRuns.createdAt))
       .limit(limit + 1); // Fetch one extra to check if there's more
@@ -107,10 +109,22 @@ export const GET: RequestHandler = async ({ url }) => {
       error: errorMap[run.id] || null,
     }));
 
+    // Get total count (with same filters)
+    const countConditions = [];
+    if (workflowId) countConditions.push(eq(workflowRuns.workflowId, parseInt(workflowId)));
+    if (status) countConditions.push(eq(workflowRuns.status, status));
+    if (trigger) countConditions.push(eq(workflowRuns.trigger, trigger));
+    if (pinned === 'true') countConditions.push(eq(workflowRuns.pinned, true));
+
+    const [{ count: totalCount }] = await db.select({ count: sql<number>`count(*)` })
+      .from(workflowRuns)
+      .where(countConditions.length > 0 ? and(...countConditions) : undefined);
+
     return json({
       runs: enrichedResults,
       nextCursor,
       hasMore,
+      totalCount: Number(totalCount),
     });
   } catch (e) {
     console.error('Failed to list runs:', e);

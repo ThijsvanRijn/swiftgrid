@@ -48,16 +48,18 @@ export const POST: RequestHandler = async ({ params }) => {
       },
     });
 
-    // Create audit log entry
-    await db.insert(runAuditLog).values({
-      runId: runId,
-      workflowId: run.workflowId!,
-      action: 'CANCELLED',
-      actor: 'user', // TODO: Get actual user ID
-      metadata: {
-        previousStatus: run.status,
-      },
-    });
+    // Create audit log entry (only if we have workflowId)
+    if (run.workflowId) {
+      await db.insert(runAuditLog).values({
+        runId: runId,
+        workflowId: run.workflowId,
+        action: 'CANCELLED',
+        actor: 'user', // TODO: Get actual user ID
+        metadata: {
+          previousStatus: run.status,
+        },
+      });
+    }
 
     return json({ success: true });
   } catch (e) {

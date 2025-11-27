@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/server/db/index';
-import { workflowRuns, runEvents, runAuditLog, workflows } from '$lib/server/db/schema';
-import { eq, and, asc } from 'drizzle-orm';
+import { workflowRuns, runEvents, runAuditLog, workflows, scheduledJobs, suspensions, runStreamChunks } from '$lib/server/db/schema';
+import { eq, asc } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 
 // =============================================================================
@@ -132,19 +132,24 @@ export const DELETE: RequestHandler = async ({ params }) => {
     const run = runs[0];
 
     // Create audit log entry BEFORE deleting
-    await db.insert(runAuditLog).values({
-      runId: run.id,
-      workflowId: run.workflowId!,
-      action: 'DELETED',
-      actor: 'user', // TODO: Get actual user ID from session
-      metadata: {
-        originalStatus: run.status,
-        reason: 'user_request',
-      },
-    });
+    if (run.workflowId) {
+      await db.insert(runAuditLog).values({
+        runId: run.id,
+        workflowId: run.workflowId,
+        action: 'DELETED',
+        actor: 'user', // TODO: Get actual user ID from session
+        metadata: {
+          originalStatus: run.status,
+          reason: 'user_request',
+        },
+      });
+    }
 
-    // Delete related records first (foreign key constraints)
+    // Delete all related records first (foreign key constraints)
     await db.delete(runEvents).where(eq(runEvents.runId, runId));
+    await db.delete(scheduledJobs).where(eq(scheduledJobs.runId, runId));
+    await db.delete(suspensions).where(eq(suspensions.runId, runId));
+    await db.delete(runStreamChunks).where(eq(runStreamChunks.runId, runId));
     
     // Delete the run
     await db.delete(workflowRuns).where(eq(workflowRuns.id, runId));

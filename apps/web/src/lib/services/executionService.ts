@@ -233,6 +233,7 @@ export async function runFromNode(nodeId: string) {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
 				startRun: true,
+				workflowId: flowStore.workflowId, // Include workflow ID for history filtering
 				startFromNode: nodeId, // Start from this specific node
 				graph,
 				trigger: 'manual'
@@ -318,6 +319,7 @@ export async function runFlow() {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
 				startRun: true,
+				workflowId: flowStore.workflowId, // Include workflow ID for history filtering
 				graph,
 				trigger: 'manual'
 			})

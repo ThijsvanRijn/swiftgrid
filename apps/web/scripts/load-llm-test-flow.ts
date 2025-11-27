@@ -1,6 +1,7 @@
-import { drizzle } from 'drizzle-orm/postgres-js';
+/// <reference types="node" />
 import postgres from 'postgres';
-import { sql } from 'drizzle-orm';
+
+const sql = postgres(process.env.DATABASE_URL || 'postgres://dev:dev123@localhost:5432/swiftgrid');
 
 // Simple test flow: HTTP → LLM → Code
 // Fetches a quote, asks LLM to analyze it, then formats the result
@@ -41,14 +42,14 @@ const testFlow = {
             data: {
                 label: 'Format Result',
                 code: `// Combine the fact and analysis
-                const fact = INPUT.fact || 'No fact available';
-                const analysis = INPUT.analysis || 'No analysis available';
+const fact = INPUT.fact || 'No fact available';
+const analysis = INPUT.analysis || 'No analysis available';
 
-                return {
-                    formatted: '📚 Fact: ' + fact + '\\n\\n🤖 Analysis: ' + analysis,
-                    wordCount: String(analysis).split(' ').length,
-                    timestamp: new Date().toISOString()
-                };`,
+return {
+    formatted: '📚 Fact: ' + fact + '\\n\\n🤖 Analysis: ' + analysis,
+    wordCount: String(analysis).split(' ').length,
+    timestamp: new Date().toISOString()
+};`,
                 inputs: JSON.stringify({
                     fact: '{{http_fact.text}}',
                     analysis: '{{llm_analyze.content}}'
@@ -65,33 +66,29 @@ const testFlow = {
 };
 
 async function loadTestFlow() {
-    const connectionString = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/swiftgrid';
-    const client = postgres(connectionString);
-    const db = drizzle(client);
+    const flowJson = JSON.stringify(testFlow);
 
     console.log('Loading LLM test flow...');
 
-    // Update the most recent workflow with our test flow
-    await db.execute(sql`
+    await sql`
         UPDATE workflows 
-        SET graph = ${JSON.stringify(testFlow)}::jsonb,
+        SET graph = ${flowJson}::jsonb,
             name = 'LLM Test Flow',
             updated_at = NOW()
         WHERE id = (SELECT id FROM workflows ORDER BY created_at DESC LIMIT 1)
-    `);
+    `;
 
     console.log('✅ LLM test flow loaded!');
     console.log('');
     console.log('Flow structure:');
     console.log('  1. HTTP: Fetches a random fact from uselessfacts.jsph.pl');
-    console.log('  2. LLM: Analyzes the fact using GPT-4o-mini');
+    console.log('  2. LLM: Analyzes the fact using Groq (llama-3.1-8b-instant)');
     console.log('  3. Code: Formats the fact + analysis together');
     console.log('');
-    console.log('⚠️  Make sure you have OPENAI_KEY in your secrets!');
+    console.log('⚠️  Make sure you have GROQ_KEY in your secrets!');
     console.log('   Go to the Secrets Vault in the sidebar to add it.');
 
-    await client.end();
+    await sql.end();
 }
 
 loadTestFlow().catch(console.error);
-
