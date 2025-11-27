@@ -22,3 +22,7 @@ thiserror = "2.0"
 
 # Backoff for retries
 rand = "0.9"
+
+# Cron scheduling
+cron = "0.15"
+chrono-tz = "0.10"

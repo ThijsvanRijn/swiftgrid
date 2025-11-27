@@ -12,9 +12,19 @@ export const workflows = pgTable('workflows', {
   webhookEnabled: boolean('webhook_enabled').default(false),
   webhookSecret: text('webhook_secret'),  // HMAC secret for signature validation
   
+  // Cron scheduling configuration
+  scheduleEnabled: boolean('schedule_enabled').default(false),
+  scheduleCron: text('schedule_cron'),           // Cron expression: "0 9 * * 1-5"
+  scheduleTimezone: text('schedule_timezone').default('UTC'),
+  scheduleInputData: jsonb('schedule_input_data'),  // Static input for scheduled runs
+  scheduleNextRun: timestamp('schedule_next_run', { withTimezone: true }),  // Pre-computed next run time
+  scheduleOverlapMode: text('schedule_overlap_mode').default('skip'),  // 'skip', 'queue_one', 'parallel'
+  
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow()
-});
+}, (table) => [
+  index('idx_workflows_schedule').on(table.scheduleNextRun)
+]);
 
 // =============================================================================
 // SECRETS - Encrypted environment variables
