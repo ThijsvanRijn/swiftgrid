@@ -5,6 +5,8 @@
 		id: string;
 		workflowId: number;
 		workflowName?: string;
+		workflowVersionId?: string | null;
+		versionNumber?: number | null;
 		status: string;
 		trigger: string;
 		pinned: boolean;
@@ -44,10 +46,10 @@
 	let runDetails = $state<RunDetails | null>(null);
 	let loadingDetails = $state(false);
 
-	// Filters - default to current workflow if available
+	// Filters - default to current workflow
 	let statusFilter = $state<string>('');
 	let triggerFilter = $state<string>('');
-	let workflowScope = $state<'current' | 'all'>(workflowId ? 'current' : 'all');
+	let workflowScope = $state<'current' | 'all'>('current');
 
 	// Sort runs with pinned at top
 	let sortedRuns = $derived(() => {
@@ -211,20 +213,25 @@
 	}
 
 	// Track previous filter values to detect changes
-	let prevFilters = { status: '', trigger: '', scope: 'current' as 'current' | 'all' };
+	let prevFilters = { status: '', trigger: '', scope: 'current' as 'current' | 'all', workflowId: null as number | null };
 	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+	let wasOpen = false;
 
 	// Single effect to handle all loading logic
 	$effect(() => {
 		if (isOpen) {
-			// Check if filters changed
+			// Check if filters changed or panel just opened
+			const justOpened = !wasOpen;
 			const filtersChanged = 
 				prevFilters.status !== statusFilter || 
 				prevFilters.trigger !== triggerFilter || 
-				prevFilters.scope !== workflowScope;
+				prevFilters.scope !== workflowScope ||
+				prevFilters.workflowId !== workflowId;
 			
-			if (filtersChanged) {
-				prevFilters = { status: statusFilter, trigger: triggerFilter, scope: workflowScope };
+			wasOpen = true;
+			
+			if (justOpened || filtersChanged) {
+				prevFilters = { status: statusFilter, trigger: triggerFilter, scope: workflowScope, workflowId };
 				loadRuns();
 			}
 			
@@ -243,7 +250,8 @@
 			};
 		} else {
 			// Reset when panel closes
-			prevFilters = { status: '', trigger: '', scope: 'current' };
+			wasOpen = false;
+			prevFilters = { status: '', trigger: '', scope: 'current', workflowId: null };
 			initialLoading = true;
 			if (refreshInterval) {
 				clearInterval(refreshInterval);
@@ -423,11 +431,21 @@
 									</div>
 								{/if}
 
-								<!-- Middle row: Trigger, Duration -->
+								<!-- Middle row: Trigger, Version, Duration -->
 								<div class="flex items-center gap-2 text-[10px] text-muted-foreground mb-2">
 									<span class="px-1.5 py-0.5 bg-sidebar-accent/50 rounded-sm">
 										{getTriggerLabel(run.trigger)}
 									</span>
+									<!-- Version badge -->
+									{#if run.versionNumber}
+										<span class="px-1.5 py-0.5 bg-emerald-500/20 text-emerald-500 rounded-sm font-medium">
+											v{run.versionNumber}
+										</span>
+									{:else}
+										<span class="px-1.5 py-0.5 bg-amber-500/20 text-amber-500 rounded-sm font-medium">
+											Draft
+										</span>
+									{/if}
 									<span>
 										{formatDuration(run.durationMs)}
 									</span>

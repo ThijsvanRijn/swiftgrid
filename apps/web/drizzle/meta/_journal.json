@@ -8,6 +8,13 @@
       "when": 1764233093215,
       "tag": "0000_safe_randall",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1764320957953,
+      "tag": "0001_glossy_shotgun",
+      "breakpoints": true
     }
   ]
 }

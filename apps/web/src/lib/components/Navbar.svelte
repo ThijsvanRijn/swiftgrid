@@ -23,10 +23,31 @@
 		onRun: () => void;
 		onOpenHistory: () => void;
 		onOpenSchedule: () => void;
+		onOpenVersions: () => void;
+		onPublish: () => void;
 		scheduleEnabled?: boolean;
+		activeVersionNumber?: number | null;
+		hasUnpublishedChanges?: boolean;
 	}
 
-	let { sseStatus, onAddHttpNode, onAddCodeNode, onAddDelayNode, onAddWebhookWaitNode, onAddRouterNode, onAddLlmNode, onSave, onRun, onOpenHistory, onOpenSchedule, scheduleEnabled = false }: Props = $props();
+	let { 
+		sseStatus, 
+		onAddHttpNode, 
+		onAddCodeNode, 
+		onAddDelayNode, 
+		onAddWebhookWaitNode, 
+		onAddRouterNode, 
+		onAddLlmNode, 
+		onSave, 
+		onRun, 
+		onOpenHistory, 
+		onOpenSchedule,
+		onOpenVersions,
+		onPublish,
+		scheduleEnabled = false,
+		activeVersionNumber = null,
+		hasUnpublishedChanges = false
+	}: Props = $props();
 
 	// Active schedules state
 	let activeSchedules = $state<ActiveSchedule[]>([]);
@@ -194,6 +215,40 @@
 				<circle cx="12" cy="12" r="10"/>
 			</svg>
 			History
+		</button>
+
+		<!-- Version indicator + Versions button -->
+		<button
+			onclick={onOpenVersions}
+			class="px-3 py-1.5 text-xs font-medium rounded-none transition-colors flex items-center gap-1.5 {hasUnpublishedChanges ? 'text-amber-500 hover:text-amber-400 hover:bg-amber-500/10' : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'}"
+			title={activeVersionNumber ? `Version ${activeVersionNumber}${hasUnpublishedChanges ? ' (modified)' : ''}` : 'No published version'}
+		>
+			<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M12 3v18"/>
+				<path d="M18 9l-6-6-6 6"/>
+				<path d="M6 15l6 6 6-6"/>
+			</svg>
+			{#if activeVersionNumber}
+				v{activeVersionNumber}
+				{#if hasUnpublishedChanges}
+					<span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+				{/if}
+			{:else}
+				Draft
+			{/if}
+		</button>
+
+		<!-- Publish button -->
+		<button
+			onclick={onPublish}
+			class="px-3 py-1.5 text-xs font-medium rounded-none transition-colors {hasUnpublishedChanges || !activeVersionNumber ? 'text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10' : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'}"
+			title={hasUnpublishedChanges ? 'Publish changes' : (activeVersionNumber ? 'No changes to publish' : 'Publish first version')}
+		>
+			<svg class="w-3.5 h-3.5 inline mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M12 19V5"/>
+				<path d="M5 12l7-7 7 7"/>
+			</svg>
+			Publish
 		</button>
 
 		<!-- Save button -->

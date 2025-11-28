@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/server/db/index';
-import { workflowRuns, runEvents, workflows } from '$lib/server/db/schema';
+import { workflowRuns, runEvents, workflows, workflowVersions } from '$lib/server/db/schema';
 import { desc, eq, and, sql, inArray } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 
@@ -50,11 +50,13 @@ export const GET: RequestHandler = async ({ url }) => {
       }
     }
 
-    // Query runs with workflow name
+    // Query runs with workflow name and version info
     const runs = await db.select({
       id: workflowRuns.id,
       workflowId: workflowRuns.workflowId,
       workflowName: workflows.name,
+      workflowVersionId: workflowRuns.workflowVersionId,
+      versionNumber: workflowVersions.versionNumber,
       status: workflowRuns.status,
       trigger: workflowRuns.trigger,
       pinned: workflowRuns.pinned,
@@ -66,6 +68,7 @@ export const GET: RequestHandler = async ({ url }) => {
     })
       .from(workflowRuns)
       .leftJoin(workflows, eq(workflowRuns.workflowId, workflows.id))
+      .leftJoin(workflowVersions, eq(workflowRuns.workflowVersionId, workflowVersions.id))
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(workflowRuns.createdAt))
       .limit(limit + 1); // Fetch one extra to check if there's more

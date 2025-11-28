@@ -153,25 +153,29 @@ async fn check_expired_suspensions(pool: &PgPool) {
 }
 
 /// Check for scheduled workflows that are due to run.
+/// Uses the active published version if available, otherwise falls back to draft.
 async fn check_scheduled_workflows(pool: &PgPool, redis_client: &redis::Client) {
     // Query for workflows that are due to run
     // Use FOR UPDATE SKIP LOCKED to prevent multiple workers from picking up the same workflow
-    let due_workflows: Vec<(i32, String, serde_json::Value, String, String, Option<serde_json::Value>, String)> = 
+    // Join with workflow_versions to get the active version's graph if available
+    let due_workflows: Vec<(i32, String, serde_json::Value, String, String, Option<serde_json::Value>, String, Option<Uuid>)> = 
         match sqlx::query_as(
             r#"
             SELECT 
-                id, 
-                name, 
-                graph, 
-                schedule_cron, 
-                COALESCE(schedule_timezone, 'UTC') as timezone,
-                schedule_input_data,
-                COALESCE(schedule_overlap_mode, 'skip') as overlap_mode
-            FROM workflows
-            WHERE schedule_enabled = true
-              AND schedule_next_run IS NOT NULL
-              AND schedule_next_run <= NOW()
-            FOR UPDATE SKIP LOCKED
+                w.id, 
+                w.name, 
+                COALESCE(wv.graph, w.graph) as graph,
+                w.schedule_cron, 
+                COALESCE(w.schedule_timezone, 'UTC') as timezone,
+                w.schedule_input_data,
+                COALESCE(w.schedule_overlap_mode, 'skip') as overlap_mode,
+                w.active_version_id
+            FROM workflows w
+            LEFT JOIN workflow_versions wv ON w.active_version_id = wv.id
+            WHERE w.schedule_enabled = true
+              AND w.schedule_next_run IS NOT NULL
+              AND w.schedule_next_run <= NOW()
+            FOR UPDATE OF w SKIP LOCKED
             LIMIT 10
             "#,
         )
@@ -199,7 +203,7 @@ async fn check_scheduled_workflows(pool: &PgPool, redis_client: &redis::Client) 
         return;
     };
 
-    for (workflow_id, name, graph, cron_expr, timezone, input_data, overlap_mode) in due_workflows {
+    for (workflow_id, name, graph, cron_expr, timezone, input_data, overlap_mode, active_version_id) in due_workflows {
         // Check overlap mode
         if overlap_mode == "skip" {
             // Check if there's already a running instance
@@ -252,21 +256,28 @@ async fn check_scheduled_workflows(pool: &PgPool, redis_client: &redis::Client) 
         // Create a new run
         let run_id = Uuid::new_v4();
 
+        let version_info = if active_version_id.is_some() {
+            "published"
+        } else {
+            "draft"
+        };
         println!(
-            "Scheduler: Starting cron run for '{}' (run_id: {})",
+            "Scheduler: Starting cron run for '{}' (run_id: {}, using {} version)",
             name,
-            &run_id.to_string()[..8]
+            &run_id.to_string()[..8],
+            version_info
         );
 
-        // Insert the workflow run
+        // Insert the workflow run (with version ID if using published version)
         let insert_result = sqlx::query(
             r#"
-            INSERT INTO workflow_runs (id, workflow_id, snapshot_graph, status, trigger, input_data)
-            VALUES ($1, $2, $3, 'pending', 'cron', $4)
+            INSERT INTO workflow_runs (id, workflow_id, workflow_version_id, snapshot_graph, status, trigger, input_data)
+            VALUES ($1, $2, $3, $4, 'pending', 'cron', $5)
             "#,
         )
         .bind(&run_id)
         .bind(workflow_id)
+        .bind(&active_version_id)
         .bind(&graph)
         .bind(&input_data)
         .execute(pool)

@@ -1,4 +1,4 @@
-import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, index, boolean } from 'drizzle-orm/pg-core';
+import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, index, boolean, unique } from 'drizzle-orm/pg-core';
 
 // =============================================================================
 // WORKFLOWS - The flow definitions (nodes + edges)
@@ -6,7 +6,10 @@ import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, inde
 export const workflows = pgTable('workflows', {
   id: serial('id').primaryKey(),
   name: text('name').notNull(),
-  graph: jsonb('graph').notNull(), 
+  graph: jsonb('graph').notNull(),  // Current draft (editable)
+  
+  // Versioning: pointer to the active published version
+  activeVersionId: uuid('active_version_id'),  // References workflow_versions.id (no FK to avoid circular)
   
   // Webhook configuration
   webhookEnabled: boolean('webhook_enabled').default(false),
@@ -23,7 +26,39 @@ export const workflows = pgTable('workflows', {
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow()
 }, (table) => [
-  index('idx_workflows_schedule').on(table.scheduleNextRun)
+  index('idx_workflows_schedule').on(table.scheduleNextRun),
+  index('idx_workflows_active_version').on(table.activeVersionId)
+]);
+
+// =============================================================================
+// WORKFLOW VERSIONS - Immutable snapshots of published workflows
+// =============================================================================
+// Each version is a frozen snapshot created when user clicks "Publish"
+// Scheduled runs use the active version, not the draft
+export const workflowVersions = pgTable('workflow_versions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workflowId: integer('workflow_id').references(() => workflows.id, { onDelete: 'cascade' }).notNull(),
+  
+  // Version number (auto-incremented per workflow)
+  versionNumber: integer('version_number').notNull(),
+  
+  // Immutable snapshot of the graph at publish time
+  graph: jsonb('graph').notNull(),
+  
+  // Optional: input/output schemas for sub-flow usage
+  inputSchema: jsonb('input_schema'),
+  outputSchema: jsonb('output_schema'),
+  
+  // Human-readable description of changes
+  changeSummary: text('change_summary'),
+  
+  // Who published this version (for audit)
+  createdBy: text('created_by'),
+  
+  createdAt: timestamp('created_at').defaultNow().notNull()
+}, (table) => [
+  index('idx_workflow_versions_workflow').on(table.workflowId),
+  unique('workflow_versions_workflow_version').on(table.workflowId, table.versionNumber)
 ]);
 
 // =============================================================================
@@ -41,6 +76,9 @@ export const secrets = pgTable('secrets', {
 export const workflowRuns = pgTable('workflow_runs', {
   id: uuid('id').primaryKey().defaultRandom(),
   workflowId: integer('workflow_id').references(() => workflows.id),
+  
+  // Which version was used for this run (null for draft runs or legacy runs)
+  workflowVersionId: uuid('workflow_version_id').references(() => workflowVersions.id),
   
   // Immutable snapshot of the graph at run time (flow versioning!)
   snapshotGraph: jsonb('snapshot_graph').notNull(),
@@ -66,7 +104,8 @@ export const workflowRuns = pgTable('workflow_runs', {
 }, (table) => [
   index('idx_workflow_runs_status').on(table.status),
   index('idx_workflow_runs_workflow_id').on(table.workflowId),
-  index('idx_workflow_runs_created').on(table.createdAt)
+  index('idx_workflow_runs_created').on(table.createdAt),
+  index('idx_workflow_runs_version').on(table.workflowVersionId)
 ]);
 
 // =============================================================================

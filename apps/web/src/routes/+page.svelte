@@ -18,7 +18,7 @@
 
 	// Services
 	import { runFlow } from '$lib/services/executionService';
-	import { saveFlow, loadLatestFlow, setFitViewCallback } from '$lib/services/flowPersistence';
+	import { saveFlow, loadLatestFlow, setFitViewCallback, publishFlow } from '$lib/services/flowPersistence';
 	import { sseService } from '$lib/services/sseService';
 
 	// Layout components
@@ -27,6 +27,7 @@
 	import CanvasToolbar from '$lib/components/CanvasToolbar.svelte';
 	import RunHistoryPanel from '$lib/components/RunHistoryPanel.svelte';
 	import SchedulePanel from '$lib/components/SchedulePanel.svelte';
+	import VersionHistoryPanel from '$lib/components/VersionHistoryPanel.svelte';
 
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -51,6 +52,10 @@
 	let sseStatus = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
 	let historyPanelOpen = $state(false);
 	let schedulePanelOpen = $state(false);
+	let versionsPanelOpen = $state(false);
+	let publishDialogOpen = $state(false);
+	let publishChangeSummary = $state('');
+	let versionRefreshTrigger = $state(0);
 
 	// Schedule configuration (loaded from flowStore)
 	let scheduleConfig = $state({
@@ -179,6 +184,123 @@
 		const position = getCanvasCenterPosition() ?? undefined;
 		flowStore.addNode(type, position);
 	}
+
+	// =================================================
+	// VERSIONING
+	// =================================================
+
+	function handleOpenPublishDialog() {
+		publishChangeSummary = '';
+		publishDialogOpen = true;
+	}
+
+	async function handlePublish() {
+		if (!flowStore.workflowId) {
+			alert('Please save the workflow first');
+			return;
+		}
+		
+		if (!publishChangeSummary.trim()) {
+			alert('Please provide a change summary');
+			return;
+		}
+		
+		const result = await publishFlow(publishChangeSummary.trim());
+		if (result) {
+			publishDialogOpen = false;
+			// Trigger version history refresh
+			versionRefreshTrigger++;
+		} else {
+			alert('Failed to publish');
+		}
+	}
+
+	async function handleRollback(versionNumber: number) {
+		if (!flowStore.workflowId) return;
+		
+		try {
+			const response = await fetch(`/api/flows/${flowStore.workflowId}/rollback`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ versionNumber })
+			});
+			
+			if (response.ok) {
+				const data = await response.json();
+				flowStore.setVersionInfo(data.activeVersionId, data.versionNumber);
+			} else {
+				const error = await response.json();
+				alert(error.error || 'Failed to set active version');
+			}
+		} catch (e) {
+			console.error('Rollback failed:', e);
+			alert('Failed to set active version');
+		}
+	}
+
+	async function handleRestoreDraft(versionNumber: number) {
+		if (!flowStore.workflowId) return;
+		
+		try {
+			const response = await fetch(`/api/flows/${flowStore.workflowId}/restore`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ versionNumber })
+			});
+			
+			if (response.ok) {
+				const data = await response.json();
+				// Reload the flow with the restored graph
+				const graph = data.graph as { nodes: any[]; edges: any[]; viewport?: any };
+				flowStore.setFlow(
+					graph.nodes || [],
+					graph.edges || [],
+					graph.viewport,
+					flowStore.workflowId!,
+					flowStore.workflowName!,
+					flowStore.activeVersionId,
+					flowStore.activeVersionNumber
+				);
+			} else {
+				const error = await response.json();
+				alert(error.error || 'Failed to restore draft');
+			}
+		} catch (e) {
+			console.error('Restore draft failed:', e);
+			alert('Failed to restore draft');
+		}
+	}
+
+	async function handleDiscardDraft() {
+		if (!flowStore.workflowId) return;
+		
+		try {
+			const response = await fetch(`/api/flows/${flowStore.workflowId}/discard`, {
+				method: 'POST'
+			});
+			
+			if (response.ok) {
+				const data = await response.json();
+				// Reload the flow with the published graph
+				const graph = data.graph as { nodes: any[]; edges: any[]; viewport?: any };
+				flowStore.setFlow(
+					graph.nodes || [],
+					graph.edges || [],
+					graph.viewport,
+					flowStore.workflowId!,
+					flowStore.workflowName!,
+					flowStore.activeVersionId,
+					flowStore.activeVersionNumber
+				);
+			} else {
+				const error = await response.json();
+				alert(error.error || 'Failed to discard draft');
+			}
+		} catch (e) {
+			console.error('Discard draft failed:', e);
+			alert('Failed to discard draft');
+		}
+	}
 </script>
 
 <div class="h-screen w-full flex flex-col text-foreground font-sans bg-canvas">
@@ -215,7 +337,11 @@
 			onRun={runFlow}
 			onOpenHistory={() => historyPanelOpen = true}
 			onOpenSchedule={() => schedulePanelOpen = true}
+			onOpenVersions={() => versionsPanelOpen = true}
+			onPublish={handleOpenPublishDialog}
 			scheduleEnabled={scheduleConfig.enabled}
+			activeVersionNumber={flowStore.activeVersionNumber}
+			hasUnpublishedChanges={flowStore.hasUnpublishedChanges}
 		/>
 
 		<!-- Main content area with toolbar and sidebar -->
@@ -228,6 +354,19 @@
 			
 			<!-- Right side panels -->
 			<div class="flex gap-3 h-full">
+				<!-- Version History Panel -->
+				<VersionHistoryPanel
+					isOpen={versionsPanelOpen}
+					onClose={() => versionsPanelOpen = false}
+					workflowId={flowStore.workflowId}
+					activeVersionId={flowStore.activeVersionId}
+					hasUnpublishedChanges={flowStore.hasUnpublishedChanges}
+					onRollback={handleRollback}
+					onRestoreDraft={handleRestoreDraft}
+					onDiscardDraft={handleDiscardDraft}
+					refreshTrigger={versionRefreshTrigger}
+				/>
+
 				<!-- Schedule Panel -->
 				<SchedulePanel
 					isOpen={schedulePanelOpen}
@@ -252,4 +391,66 @@
 			</div>
 		</div>
 	</div>
+
+	<!-- Publish Dialog -->
+	{#if publishDialogOpen}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div 
+			class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 pointer-events-auto"
+			onclick={() => publishDialogOpen = false}
+			onkeydown={(e) => e.key === 'Escape' && (publishDialogOpen = false)}
+		>
+			<div 
+				class="bg-panel border border-panel-border shadow-float w-[400px] max-w-[90vw]"
+				onclick={(e) => e.stopPropagation()}
+				onkeydown={(e) => e.stopPropagation()}
+				role="dialog"
+				aria-modal="true"
+				tabindex="-1"
+			>
+				<div class="px-4 py-3 border-b border-panel-border">
+					<h2 class="text-sm font-medium">Publish New Version</h2>
+					<p class="text-xs text-muted-foreground mt-1">
+						Create an immutable snapshot of the current workflow.
+						{#if flowStore.activeVersionNumber}
+							Current version: v{flowStore.activeVersionNumber}
+						{:else}
+							This will be version 1.
+						{/if}
+					</p>
+				</div>
+				
+				<div class="px-4 py-3">
+					<!-- svelte-ignore a11y_label_has_associated_control -->
+					<label class="block text-xs font-medium mb-1.5">
+						Change Summary <span class="text-red-500">*</span>
+					</label>
+					<textarea
+						bind:value={publishChangeSummary}
+						placeholder="What changed in this version? (required)"
+						class="w-full h-20 px-2 py-1.5 text-xs bg-sidebar-accent/30 border border-sidebar-border rounded-sm resize-none focus:outline-none focus:ring-1 focus:ring-ring {!publishChangeSummary.trim() ? 'border-red-500/50' : ''}"
+					></textarea>
+					{#if !publishChangeSummary.trim()}
+						<p class="text-[10px] text-red-500 mt-1">Please describe what changed in this version</p>
+					{/if}
+				</div>
+				
+				<div class="px-4 py-3 border-t border-panel-border flex justify-end gap-2">
+					<button
+						onclick={() => publishDialogOpen = false}
+						class="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 rounded-sm transition-colors"
+					>
+						Cancel
+					</button>
+					<button
+						onclick={handlePublish}
+						disabled={!publishChangeSummary.trim()}
+						class="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						Publish v{(flowStore.activeVersionNumber ?? 0) + 1}
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 </div>

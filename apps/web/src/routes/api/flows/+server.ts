@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/server/db/index';
-import { workflows } from '$lib/server/db/schema';
-import { desc } from 'drizzle-orm';
+import { workflows, workflowVersions } from '$lib/server/db/schema';
+import { desc, eq } from 'drizzle-orm';
 
-// GET: Fetch the latest saved workflow
+// GET: Fetch the latest saved workflow with version info
 export async function GET() {
     try {
         // Get the most recently created flow
@@ -16,7 +16,26 @@ export async function GET() {
             return json({ graph: null });
         }
 
-        return json(allFlows[0]);
+        const workflow = allFlows[0];
+        
+        // Get active version info if available
+        let activeVersion = null;
+        if (workflow.activeVersionId) {
+            const [version] = await db.select({
+                id: workflowVersions.id,
+                versionNumber: workflowVersions.versionNumber,
+                createdAt: workflowVersions.createdAt,
+            })
+                .from(workflowVersions)
+                .where(eq(workflowVersions.id, workflow.activeVersionId))
+                .limit(1);
+            activeVersion = version || null;
+        }
+
+        return json({
+            ...workflow,
+            activeVersion,
+        });
     } catch (e) {
         console.error("DB Load Error:", e);
         return json({ error: 'Failed to load' }, { status: 500 });
@@ -26,16 +45,30 @@ export async function GET() {
 // POST: Save the current state
 export async function POST({ request }) {
     const body = await request.json();
-    const { nodes, edges } = body;
+    const { nodes, edges, viewport, workflowId } = body;
 
-    console.log("Saving flow with", nodes.length, "nodes");
+    console.log("Saving flow with", nodes.length, "nodes", workflowId ? `(updating ${workflowId})` : '(new)');
 
     try {
-        // For this milestone, we just create a new entry every time (History Mode)
-        // Later we can implement "Update existing ID"
+        // If we have an existing workflow ID, update it
+        if (workflowId) {
+            const [updated] = await db.update(workflows)
+                .set({
+                    graph: { nodes, edges, viewport },
+                    updatedAt: new Date()
+                })
+                .where(eq(workflows.id, workflowId))
+                .returning();
+            
+            if (updated) {
+                return json({ success: true, id: updated.id });
+            }
+        }
+        
+        // Otherwise create a new workflow
         const result = await db.insert(workflows).values({
-            name: 'My SwiftGrid Flow', // Hardcoded name for now
-            graph: { nodes, edges }    // Store the raw JSON
+            name: 'My SwiftGrid Flow',
+            graph: { nodes, edges, viewport }
         }).returning();
 
         return json({ success: true, id: result[0].id });

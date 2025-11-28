@@ -75,8 +75,18 @@ function connect() {
     eventSource.addEventListener('chunk', (event) => {
         const chunk: StreamChunk = JSON.parse(event.data);
         
-        // Always log chunks for debugging
-        console.log(`SSE CHUNK: [${chunk.node_id}] ${chunk.chunk_type}: ${chunk.content}`);
+        // Developer-friendly logging based on chunk type (no emojis for CI/log parsers)
+        if (chunk.chunk_type === 'token') {
+            console.log(`%c[${chunk.node_id}] token: ${chunk.content}`, 'color: #10b981; font-weight: 500;');
+        } else if (chunk.chunk_type === 'progress') {
+            console.log(`%c[${chunk.node_id}] progress: ${chunk.content}`, 'color: #3b82f6;');
+        } else if (chunk.chunk_type === 'error') {
+            console.error(`[${chunk.node_id}] error: ${chunk.content}`);
+        } else if (chunk.chunk_type === 'complete') {
+            console.log(`%c[${chunk.node_id}] complete`, 'color: #10b981; font-weight: bold;');
+        } else {
+            console.log(`SSE CHUNK: [${chunk.node_id}] ${chunk.chunk_type}: ${chunk.content}`);
+        }
         
         // Notify listeners
         onChunk?.(chunk);

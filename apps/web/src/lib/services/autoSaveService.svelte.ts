@@ -23,13 +23,37 @@ function hashFlow(): string {
             type: n.type,
             position: n.position,
             data: {
+                // Common fields
                 label: n.data.label,
+                // HTTP node fields
                 url: n.data.url,
                 method: n.data.method,
                 headers: n.data.headers,
                 body: n.data.body,
+                // Code node fields
                 code: n.data.code,
-                inputs: n.data.inputs
+                inputs: n.data.inputs,
+                // Delay node fields
+                delayMs: n.data.delayMs,
+                delayStr: n.data.delayStr,
+                // Webhook wait fields
+                timeoutMs: n.data.timeoutMs,
+                timeoutStr: n.data.timeoutStr,
+                description: n.data.description,
+                // Router node fields
+                routeBy: n.data.routeBy,
+                conditions: n.data.conditions,
+                defaultOutput: n.data.defaultOutput,
+                routerMode: n.data.routerMode,
+                // LLM node fields
+                baseUrl: n.data.baseUrl,
+                apiKey: n.data.apiKey,
+                model: n.data.model,
+                systemPrompt: n.data.systemPrompt,
+                userPrompt: n.data.userPrompt,
+                temperature: n.data.temperature,
+                maxTokens: n.data.maxTokens,
+                stream: n.data.stream,
             }
         })),
         edges: flowStore.edges,
@@ -58,7 +82,8 @@ async function performSave() {
             body: JSON.stringify({ 
                 nodes: flowStore.nodes, 
                 edges: flowStore.edges,
-                viewport: flowStore.viewport
+                viewport: flowStore.viewport,
+                workflowId: flowStore.workflowId  // Pass existing ID to update instead of create
             })
         });
 

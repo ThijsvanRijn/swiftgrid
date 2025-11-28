@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import { createHmac, createHash } from 'crypto';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
-import { workflows, workflowRuns, runEvents, secrets, webhookDeliveries } from '$lib/server/db/schema';
+import { workflows, workflowRuns, runEvents, secrets, webhookDeliveries, workflowVersions } from '$lib/server/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { REDIS_STREAMS, EVENT_TYPES } from '@swiftgrid/shared';
 import { env } from '$env/dynamic/private';
@@ -111,19 +111,44 @@ export async function POST({ params, request, getClientAddress }) {
         return json(existingDelivery.responseBody, { status: existingDelivery.responseStatus });
     }
     
-    // 6. Create the run
-    const graph = workflow.graph as { nodes: any[]; edges: any[] };
+    // 6. Get the published version graph (NOT the draft!)
+    // Webhooks always use the published version for production stability
+    let graph: { nodes: any[]; edges: any[] };
+    let versionId: string | null = null;
+    
+    if (workflow.activeVersionId) {
+        // Use published version
+        const [version] = await db.select()
+            .from(workflowVersions)
+            .where(eq(workflowVersions.id, workflow.activeVersionId));
+        
+        if (version) {
+            graph = version.graph as { nodes: any[]; edges: any[] };
+            versionId = version.id;
+        } else {
+            // Fallback to draft if version not found (shouldn't happen)
+            console.warn(`Webhook: Version ${workflow.activeVersionId} not found, falling back to draft`);
+            graph = workflow.graph as { nodes: any[]; edges: any[] };
+        }
+    } else {
+        // No published version - reject the webhook
+        return json({ 
+            error: 'No published version available. Please publish the workflow before triggering via webhook.' 
+        }, { status: 400 });
+    }
+    
     const clientIp = getClientAddress();
     
     const [run] = await db.insert(workflowRuns).values({
         workflowId: flowIdNum,
+        workflowVersionId: versionId,
         snapshotGraph: graph,
         status: 'pending',
         trigger: 'webhook',
         inputData: bodyJson
     }).returning();
     
-    console.log(`Webhook: Created run ${run.id} for flow ${flowIdNum}`);
+    console.log(`Webhook: Created run ${run.id} for flow ${flowIdNum} (version: ${versionId ? 'published' : 'draft'})`);
     
     // 7. Log RUN_CREATED event with webhook context
     await db.insert(runEvents).values({
@@ -133,7 +158,8 @@ export async function POST({ params, request, getClientAddress }) {
             trigger: 'webhook',
             sourceIp: clientIp,
             idempotencyKey,
-            inputData: bodyJson
+            inputData: bodyJson,
+            versionId
         }
     });
     

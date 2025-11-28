@@ -82,47 +82,73 @@ async fn handle_streaming_response(
     data: &LlmNodeData,
     stream_ctx: Option<&StreamContext>,
 ) -> (u16, Option<serde_json::Value>) {
+    use futures_util::StreamExt;
+    
     let mut full_content = String::new();
     let mut prompt_tokens: u32 = 0;
     let mut completion_tokens: u32 = 0;
     let mut model_used = data.model.clone();
+    let mut buffer = String::new();
 
-    let body_text = resp.text().await.unwrap_or_default();
-
-    // Parse SSE events (data: {...}\n\n format)
-    for line in body_text.lines() {
-        if line.starts_with("data: ") {
-            let json_str = &line[6..];
-            if json_str == "[DONE]" {
+    // Stream the response bytes as they arrive
+    let mut stream = resp.bytes_stream();
+    
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(ctx) = stream_ctx {
+                    ctx.error(&format!("Stream error: {}", e)).await;
+                }
                 break;
             }
+        };
+        
+        // Append to buffer and process complete lines
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        
+        // Process complete SSE events (lines ending with \n)
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim().to_string();
+            buffer = buffer[newline_pos + 1..].to_string();
+            
+            if line.is_empty() {
+                continue;
+            }
+            
+            if line.starts_with("data: ") {
+                let json_str = &line[6..];
+                if json_str == "[DONE]" {
+                    continue;
+                }
 
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(json_str) {
-                // Extract content delta
-                if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
-                    full_content.push_str(delta);
-                    // Stream each token to the UI
-                    if let Some(ctx) = stream_ctx {
-                        ctx.token(delta).await;
+                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    // Extract content delta
+                    if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
+                        full_content.push_str(delta);
+                        // Stream each token to the UI in real-time!
+                        if let Some(ctx) = stream_ctx {
+                            ctx.token(delta).await;
+                        }
                     }
-                }
 
-                // Capture model if provided
-                if let Some(m) = chunk["model"].as_str() {
-                    model_used = m.to_string();
-                }
+                    // Capture model if provided
+                    if let Some(m) = chunk["model"].as_str() {
+                        model_used = m.to_string();
+                    }
 
-                // Some providers include usage in the final chunk
-                if let Some(usage) = chunk.get("usage") {
-                    prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
-                    completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    // Some providers include usage in the final chunk
+                    if let Some(usage) = chunk.get("usage") {
+                        prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                        completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                    }
                 }
             }
         }
     }
 
     if let Some(ctx) = stream_ctx {
-        ctx.progress("Complete").await;
+        ctx.complete().await;
     }
 
     (
