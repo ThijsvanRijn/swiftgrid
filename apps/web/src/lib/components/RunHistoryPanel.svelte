@@ -1,4 +1,6 @@
 <script lang="ts">
+	import RunDetailView from './RunDetailView.svelte';
+
 	interface Run {
 		id: string;
 		workflowId: number;
@@ -198,17 +200,6 @@
 		return date.toLocaleDateString();
 	}
 
-	function getStatusColor(status: string): string {
-		switch (status) {
-			case 'completed': return 'text-emerald-500';
-			case 'failed': return 'text-red-500';
-			case 'running': return 'text-blue-500';
-			case 'pending': return 'text-amber-500';
-			case 'cancelled': return 'text-muted-foreground';
-			default: return 'text-muted-foreground';
-		}
-	}
-
 	function getTriggerLabel(trigger: string): string {
 		switch (trigger) {
 			case 'manual': return 'Manual';
@@ -264,110 +255,14 @@
 
 {#if isOpen}
 	<div class="w-[400px] bg-panel border border-panel-border rounded-none text-sidebar-foreground flex flex-col shadow-float pointer-events-auto h-full overflow-hidden">
-		{#if selectedRunId && runDetails}
+		{#if selectedRunId}
 			<!-- Run Detail View -->
-			<div class="flex items-center justify-between px-3 py-2.5 border-b border-sidebar-border">
-				<div class="flex items-center gap-2">
-					<button
-						onclick={closeDetails}
-						class="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-						title="Back to list"
-					>
-						<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<path d="M19 12H5M12 19l-7-7 7-7"/>
-						</svg>
-					</button>
-					<span class="text-sm font-medium">Run Details</span>
-				</div>
-				<code class="text-[10px] font-mono text-muted-foreground">{selectedRunId.slice(0, 8)}</code>
-			</div>
-
-			<div class="flex-1 overflow-y-auto p-3 space-y-3">
-				{#if loadingDetails}
-					<div class="flex items-center justify-center h-32 text-muted-foreground text-sm">
-						<svg class="w-4 h-4 animate-spin mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-						</svg>
-						Loading...
-					</div>
-				{:else}
-					<!-- Run info -->
-					<div class="p-2.5 bg-sidebar-accent/30 rounded-sm border border-sidebar-border">
-						<div class="flex items-center justify-between mb-2">
-							<span class={`text-xs font-medium px-1.5 py-0.5 rounded-sm ${
-								runDetails.run.status === 'completed' ? 'bg-emerald-500/20 text-emerald-500' :
-								runDetails.run.status === 'failed' ? 'bg-red-500/20 text-red-500' :
-								runDetails.run.status === 'running' ? 'bg-blue-500/20 text-blue-500' :
-								runDetails.run.status === 'pending' ? 'bg-amber-500/20 text-amber-500' :
-								'bg-muted/50 text-muted-foreground'
-							}`}>
-								{runDetails.run.status}
-							</span>
-							<span class="text-[10px] text-muted-foreground">
-								{getTriggerLabel(runDetails.run.trigger)}
-							</span>
-						</div>
-						<div class="text-xs text-muted-foreground space-y-1">
-							<div>Workflow: <span class="text-foreground">{runDetails.run.workflowName}</span></div>
-							<div>Started: <span class="text-foreground">{runDetails.run.startedAt ? new Date(runDetails.run.startedAt).toLocaleString() : '-'}</span></div>
-							<div>Duration: <span class="text-foreground">{formatDuration(runDetails.run.durationMs)}</span></div>
-						</div>
-					</div>
-
-					<!-- Node Results -->
-					<div>
-						<span class="text-xs font-medium text-muted-foreground block mb-2">Node Results</span>
-						<div class="space-y-1.5">
-							{#each Object.entries(runDetails.nodeResults) as [nodeId, result]}
-								<div class="p-2 bg-sidebar-accent/20 rounded-sm border border-sidebar-border">
-									<div class="flex items-center justify-between mb-1">
-										<code class="text-[10px] font-mono">{nodeId}</code>
-										<span class={`text-[10px] ${
-											result.status === 'success' ? 'text-emerald-500' :
-											result.status === 'error' ? 'text-red-500' :
-											result.status === 'running' ? 'text-blue-500' :
-											'text-muted-foreground'
-										}`}>
-											{result.status}
-										</span>
-									</div>
-									{#if result.error}
-										<div class="text-[10px] text-red-400 truncate">{result.error}</div>
-									{:else if result.result}
-										<pre class="text-[9px] text-muted-foreground bg-background/50 p-1.5 rounded-sm overflow-x-auto max-h-20">{JSON.stringify(result.result, null, 2)}</pre>
-									{/if}
-								</div>
-							{/each}
-							{#if Object.keys(runDetails.nodeResults).length === 0}
-								<div class="text-[10px] text-muted-foreground text-center py-4">No node results yet</div>
-							{/if}
-						</div>
-					</div>
-
-					<!-- Events Timeline -->
-					<div>
-						<span class="text-xs font-medium text-muted-foreground block mb-2">Events ({runDetails.events.length})</span>
-						<div class="space-y-1 max-h-40 overflow-y-auto">
-							{#each runDetails.events.slice(-20) as event}
-								<div class="flex items-start gap-2 text-[10px]">
-									<span class="text-muted-foreground shrink-0">{new Date(event.createdAt).toLocaleTimeString()}</span>
-									<span class={
-										event.eventType.includes('COMPLETED') ? 'text-emerald-500' :
-										event.eventType.includes('FAILED') ? 'text-red-500' :
-										event.eventType.includes('STARTED') ? 'text-blue-500' :
-										'text-foreground'
-									}>
-										{event.eventType}
-									</span>
-									{#if event.nodeId}
-										<code class="text-muted-foreground">{event.nodeId}</code>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					</div>
-				{/if}
-			</div>
+			<RunDetailView 
+				runId={selectedRunId}
+				{runDetails}
+				loading={loadingDetails}
+				onBack={closeDetails}
+			/>
 		{:else}
 			<!-- Run List View -->
 			<div class="flex items-center justify-between px-3 py-2.5 border-b border-sidebar-border">
@@ -610,7 +505,7 @@
 			<div class="px-3 py-2 border-t border-sidebar-border bg-sidebar-accent/30">
 				<div class="flex items-center justify-between text-[10px] text-muted-foreground">
 					<span>{totalCount} total run{totalCount !== 1 ? 's' : ''}{runs.length < totalCount ? ` (${runs.length} loaded)` : ''}</span>
-					<span>Auto-refresh: 3s</span>
+					<span>Auto-refresh: 2s</span>
 				</div>
 			</div>
 		{/if}
