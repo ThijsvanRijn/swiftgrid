@@ -125,6 +125,10 @@ export const runEvents = pgTable('run_events', {
   // Event type (see list above)
   eventType: text('event_type').notNull(),
   
+  // Retry attempt number (0-indexed, null for non-node events)
+  // Used for idempotency: run_id + node_id + retry_count uniquely identifies an execution attempt
+  retryCount: integer('retry_count'),
+  
   // Event-specific data (error messages, results, retry info, etc.)
   payload: jsonb('payload'),
   
@@ -133,7 +137,9 @@ export const runEvents = pgTable('run_events', {
 }, (table) => [
   index('idx_run_events_run_id').on(table.runId),
   index('idx_run_events_type').on(table.eventType),
-  index('idx_run_events_node_id').on(table.nodeId)
+  index('idx_run_events_node_id').on(table.nodeId),
+  // Idempotency index: fast lookup for "did this specific retry attempt complete?"
+  index('idx_run_events_idempotency').on(table.runId, table.nodeId, table.retryCount, table.eventType)
 ]);
 
 // =============================================================================

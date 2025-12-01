@@ -15,6 +15,13 @@
       "when": 1764320957953,
       "tag": "0001_glossy_shotgun",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1764400000000,
+      "tag": "0002_node_idempotency",
+      "breakpoints": true
     }
   ]
 }

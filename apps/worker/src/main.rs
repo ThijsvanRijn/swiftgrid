@@ -17,7 +17,7 @@ use uuid::Uuid;
 // Import from library modules
 use swiftgrid_worker::{
     cancellation::{self, CancellationRegistry},
-    events::{log_event, EventType},
+    events::{has_node_completed, log_event, log_event_with_retry, EventType},
     nodes::{self, code::run_js_safely, JsTask},
     retry::{calculate_backoff, is_retryable_error},
     scheduler,
@@ -256,6 +256,25 @@ async fn process_job(
                 return;
             }
         }
+
+        // Idempotency check: skip if this exact attempt already completed
+        // Prevents duplicate execution after worker crash (post-execution, pre-ACK)
+        match has_node_completed(&db_pool, rid, &job_id, job.retry_count).await {
+            Ok(true) => {
+                println!(
+                    "  -> Skipping node {} (attempt {}) - already executed (idempotency)",
+                    job_id,
+                    job.retry_count + 1
+                );
+                ack_message(&redis_client, &group_name, &msg_id).await;
+                return;
+            }
+            Err(e) => {
+                // Log but continue - better to risk duplicate than to stall
+                eprintln!("  -> Warning: idempotency check failed: {}", e);
+            }
+            Ok(false) => {} // Normal case: proceed with execution
+        }
     }
 
     // Log NODE_STARTED event
@@ -297,11 +316,12 @@ async fn process_job(
     if was_cancelled {
         println!("  -> Node {} cancelled", job_id);
         if let Some(ref rid) = run_id {
-            let _ = log_event(
+            let _ = log_event_with_retry(
                 &db_pool,
                 rid,
                 &job_id,
                 EventType::NodeCancelled,
+                Some(job.retry_count),
                 serde_json::json!({
                     "duration_ms": duration_ms,
                     "message": "Execution cancelled by user"
@@ -549,14 +569,15 @@ async fn handle_final_result(
     redis_client: &redis::Client,
     isolated: bool,
 ) {
-    // Log completion/failure event
+    // Log completion/failure event with retry_count for idempotency
     if let Some(rid) = run_id {
         if is_success {
-            let _ = log_event(
+            let _ = log_event_with_retry(
                 db_pool,
                 rid,
                 &job.id,
                 EventType::NodeCompleted,
+                Some(job.retry_count),
                 serde_json::json!({
                     "result": body,
                     "duration_ms": duration_ms,
@@ -564,11 +585,12 @@ async fn handle_final_result(
             )
             .await;
         } else {
-            let _ = log_event(
+            let _ = log_event_with_retry(
                 db_pool,
                 rid,
                 &job.id,
                 EventType::NodeFailed,
+                Some(job.retry_count),
                 serde_json::json!({
                     "error": body.as_ref().and_then(|b| b.get("error")).unwrap_or(&serde_json::json!("Unknown error")),
                     "fatal": !is_retryable_error(status),
