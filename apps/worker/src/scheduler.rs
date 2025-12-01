@@ -256,17 +256,20 @@ async fn check_scheduled_workflows(pool: &PgPool, redis_client: &redis::Client) 
         // Create a new run
         let run_id = Uuid::new_v4();
 
-        let version_info = if active_version_id.is_some() {
-            "published"
+        if active_version_id.is_some() {
+            println!(
+                "Scheduler: Starting cron run for '{}' (run_id: {}, using published version)",
+                name,
+                &run_id.to_string()[..8]
+            );
         } else {
-            "draft"
-        };
-        println!(
-            "Scheduler: Starting cron run for '{}' (run_id: {}, using {} version)",
-            name,
-            &run_id.to_string()[..8],
-            version_info
-        );
+            // Warn when running unpublished workflow - this shouldn't happen after migration
+            eprintln!(
+                "Scheduler: Starting cron run for '{}' (run_id: {}) using DRAFT - no published version exists!",
+                name,
+                &run_id.to_string()[..8]
+            );
+        }
 
         // Insert the workflow run (with version ID if using published version)
         let insert_result = sqlx::query(
