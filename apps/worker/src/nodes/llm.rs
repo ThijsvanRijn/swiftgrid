@@ -1,16 +1,20 @@
 //! LLM (Large Language Model) node execution.
 //!
 //! Supports any OpenAI-compatible API including OpenAI, Groq, Together, and Ollama.
+//! Includes cancellation support for streaming responses.
 
 use crate::streaming::StreamContext;
 use crate::types::LlmNodeData;
+use tokio_util::sync::CancellationToken;
 
-/// Execute an LLM chat completion request.
+/// Execute an LLM chat completion request with cancellation support.
+/// Returns (status_code, body, was_cancelled).
 pub async fn execute(
     client: reqwest::Client,
     data: LlmNodeData,
     stream_ctx: Option<&StreamContext>,
-) -> (u16, Option<serde_json::Value>) {
+    cancel_token: &CancellationToken,
+) -> (u16, Option<serde_json::Value>, bool) {
     println!(
         "  → LLM: model={}, messages={}, stream={}",
         data.model,
@@ -48,23 +52,39 @@ pub async fn execute(
             .await;
     }
 
-    // Make the API request
-    let response = client
-        .post(&endpoint)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", data.api_key))
-        .json(&request_body)
-        .send()
-        .await;
+    // Check cancellation before making request
+    if cancel_token.is_cancelled() {
+        return (499, Some(serde_json::json!({ "error": "Request cancelled" })), true);
+    }
+
+    // Make the API request with cancellation support
+    let response = tokio::select! {
+        biased;
+
+        _ = cancel_token.cancelled() => {
+            if let Some(ctx) = stream_ctx {
+                ctx.progress("Cancelled").await;
+            }
+            return (499, Some(serde_json::json!({ "error": "Request cancelled" })), true);
+        }
+
+        result = client
+            .post(&endpoint)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", data.api_key))
+            .json(&request_body)
+            .send() => result
+    };
 
     match response {
         Ok(resp) => {
             let status_code = resp.status().as_u16();
 
             if data.stream && status_code == 200 {
-                handle_streaming_response(resp, &data, stream_ctx).await
+                handle_streaming_response(resp, &data, stream_ctx, cancel_token).await
             } else {
-                handle_non_streaming_response(resp, status_code, &data, stream_ctx).await
+                let (status, body) = handle_non_streaming_response(resp, status_code, &data, stream_ctx).await;
+                (status, body, false)
             }
         }
         Err(e) => (
@@ -72,16 +92,19 @@ pub async fn execute(
             Some(serde_json::json!({
                 "error": format!("Request failed: {}", e)
             })),
+            false,
         ),
     }
 }
 
-/// Handle a streaming SSE response from the LLM API.
+/// Handle a streaming SSE response from the LLM API with cancellation support.
+/// Returns (status_code, body, was_cancelled).
 async fn handle_streaming_response(
     resp: reqwest::Response,
     data: &LlmNodeData,
     stream_ctx: Option<&StreamContext>,
-) -> (u16, Option<serde_json::Value>) {
+    cancel_token: &CancellationToken,
+) -> (u16, Option<serde_json::Value>, bool) {
     use futures_util::StreamExt;
     
     let mut full_content = String::new();
@@ -89,11 +112,22 @@ async fn handle_streaming_response(
     let mut completion_tokens: u32 = 0;
     let mut model_used = data.model.clone();
     let mut buffer = String::new();
+    let mut was_cancelled = false;
 
     // Stream the response bytes as they arrive
     let mut stream = resp.bytes_stream();
     
     while let Some(chunk_result) = stream.next().await {
+        // Check for cancellation between chunks - this is the key cancellation point!
+        if cancel_token.is_cancelled() {
+            println!("  -> LLM stream cancelled after {} chars", full_content.len());
+            if let Some(ctx) = stream_ctx {
+                ctx.progress("Cancelled").await;
+            }
+            was_cancelled = true;
+            break;
+        }
+
         let chunk = match chunk_result {
             Ok(c) => c,
             Err(e) => {
@@ -147,6 +181,18 @@ async fn handle_streaming_response(
         }
     }
 
+    if was_cancelled {
+        return (
+            499,
+            Some(serde_json::json!({
+                "error": "Request cancelled",
+                "partial_content": full_content,
+                "model": model_used
+            })),
+            true,
+        );
+    }
+
     if let Some(ctx) = stream_ctx {
         ctx.complete().await;
     }
@@ -163,6 +209,7 @@ async fn handle_streaming_response(
             },
             "streamed": true
         })),
+        false,
     )
 }
 

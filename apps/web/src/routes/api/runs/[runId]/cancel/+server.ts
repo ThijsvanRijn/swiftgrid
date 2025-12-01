@@ -1,12 +1,22 @@
 import { json } from '@sveltejs/kit';
+import Redis from 'ioredis';
 import { db } from '$lib/server/db/index';
 import { workflowRuns, runEvents, runAuditLog } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
+import { env } from '$env/dynamic/private';
 import type { RequestHandler } from './$types';
+
+const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
 
 // =============================================================================
 // POST /api/runs/[runId]/cancel - Cancel a running workflow
 // =============================================================================
+// This endpoint:
+// 1. Updates the run status in the database
+// 2. Logs a RUN_CANCELLED event
+// 3. Publishes a cancellation signal to Redis pub/sub
+//
+// The worker listens on cancel:{runId} and will abort in-flight operations.
 export const POST: RequestHandler = async ({ params }) => {
   const { runId } = params;
 
@@ -60,6 +70,11 @@ export const POST: RequestHandler = async ({ params }) => {
         },
       });
     }
+
+    // Publish cancellation signal to Redis pub/sub
+    // Workers subscribed to cancel:* will receive this and abort in-flight work
+    await redis.publish(`cancel:${runId}`, 'cancel');
+    console.log(`Published cancellation signal for run ${runId}`);
 
     return json({ success: true });
   } catch (e) {

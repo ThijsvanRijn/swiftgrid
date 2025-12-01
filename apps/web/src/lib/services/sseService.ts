@@ -55,18 +55,21 @@ function connect() {
     eventSource.addEventListener('result', (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
+        const isCancelled = result.status_code === 499;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         const isolatedInfo = result.isolated ? ' (isolated)' : '';
-        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}${isolatedInfo}`);
+        const statusIcon = isCancelled ? '-' : (isSuccess ? '✓' : '✗');
+        console.log(`SSE: Node ${result.node_id} ${statusIcon}${durationInfo}${isolatedInfo}`);
         
-        // Don't trigger downstream for isolated runs
-        if (!result.isolated) {
+        // Don't trigger downstream for isolated runs or cancelled nodes
+        if (!result.isolated && !isCancelled) {
             handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
         } else {
             // Just update the node status, don't orchestrate
             import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
-                flowStore.updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
+                const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
+                flowStore.updateNodeStatus(result.node_id, status as any, result.body);
             });
         }
     });
@@ -96,17 +99,20 @@ function connect() {
     eventSource.onmessage = (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
         const isSuccess = result.status_code >= 200 && result.status_code < 300;
+        const isCancelled = result.status_code === 499;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         const isolatedInfo = result.isolated ? ' (isolated)' : '';
-        console.log(`SSE: Node ${result.node_id} ${isSuccess ? '✓' : '✗'}${durationInfo}${isolatedInfo}`);
+        const statusIcon = isCancelled ? '-' : (isSuccess ? '✓' : '✗');
+        console.log(`SSE: Node ${result.node_id} ${statusIcon}${durationInfo}${isolatedInfo}`);
         
-        // Don't trigger downstream for isolated runs
-        if (!result.isolated) {
+        // Don't trigger downstream for isolated runs or cancelled nodes
+        if (!result.isolated && !isCancelled) {
             handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
         } else {
             import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
-                flowStore.updateNodeStatus(result.node_id, isSuccess ? 'success' : 'error', result.body);
+                const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
+                flowStore.updateNodeStatus(result.node_id, status as any, result.body);
             });
         }
     };

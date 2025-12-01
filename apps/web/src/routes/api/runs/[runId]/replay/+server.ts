@@ -68,6 +68,15 @@ export const POST: RequestHandler = async ({ params }) => {
 
     // Schedule root nodes
     for (const node of rootNodes) {
+      // Build job payload
+      const job = buildJobFromNode(node, newRun.id, originalRun.inputData);
+      
+      // Skip unknown node types
+      if (!job) {
+        console.warn(`Skipping unknown node type in replay: ${node.type}`);
+        continue;
+      }
+      
       // Log NODE_SCHEDULED event
       await db.insert(runEvents).values({
         runId: newRun.id,
@@ -75,9 +84,6 @@ export const POST: RequestHandler = async ({ params }) => {
         eventType: 'NODE_SCHEDULED',
         payload: {},
       });
-
-      // Build job payload
-      const job = buildJobFromNode(node, newRun.id, originalRun.inputData);
       
       // Push to Redis
       await redis.xadd(
@@ -99,10 +105,10 @@ export const POST: RequestHandler = async ({ params }) => {
   }
 };
 
-// Helper to build job from node (simplified version)
+// Helper to build job from node (must match format in /api/run)
 function buildJobFromNode(node: any, runId: string, inputData: any): any {
   const baseJob = {
-    node_id: node.id,
+    id: node.id,
     run_id: runId,
     retry_count: 0,
     max_retries: 3,
@@ -116,45 +122,97 @@ function buildJobFromNode(node: any, runId: string, inputData: any): any {
         ...baseJob,
         node: {
           type: 'HTTP',
-          url: node.data.url || '',
-          method: node.data.method || 'GET',
-          headers: node.data.headers || {},
-          body: node.data.body || '',
+          data: {
+            url: node.data.url || '',
+            method: node.data.method || 'GET',
+            headers: node.data.headers || {},
+            body: node.data.body || null,
+          },
         },
       };
-    case 'code':
+    case 'code-execution':
       return {
         ...baseJob,
         node: {
           type: 'CODE',
-          code: node.data.code || '',
-          language: node.data.language || 'javascript',
+          data: {
+            code: node.data.code || '',
+            inputs: node.data.inputs || null,
+          },
         },
       };
     case 'delay':
       return {
         ...baseJob,
+        max_retries: 0,
         node: {
           type: 'DELAY',
-          duration_ms: node.data.delayMs || 1000,
-          duration_str: node.data.delayStr,
+          data: {
+            duration_ms: node.data.delayMs || 5000,
+            duration_str: node.data.delayStr,
+          },
         },
       };
     case 'webhook-wait':
       return {
         ...baseJob,
+        max_retries: 0,
         node: {
           type: 'WEBHOOKWAIT',
-          timeout_ms: node.data.timeoutMs || 7 * 24 * 60 * 60 * 1000,
-          timeout_str: node.data.timeoutStr,
-          description: node.data.description,
+          data: {
+            timeout_ms: node.data.timeoutMs || 7 * 24 * 60 * 60 * 1000,
+            timeout_str: node.data.timeoutStr,
+            description: node.data.description || 'Wait for external event',
+          },
+        },
+      };
+    case 'router':
+      return {
+        ...baseJob,
+        max_retries: 0,
+        node: {
+          type: 'ROUTER',
+          data: {
+            route_by: node.data.routeBy || '',
+            conditions: (node.data.conditions || []).map((c: any) => ({
+              id: c.id,
+              label: c.label,
+              expression: c.expression,
+            })),
+            default_output: node.data.defaultOutput || '',
+            mode: node.data.routerMode || 'first_match',
+          },
+        },
+      };
+    case 'llm':
+      const messages: Array<{ role: string; content: string }> = [];
+      if (node.data.systemPrompt) {
+        messages.push({ role: 'system', content: node.data.systemPrompt });
+      }
+      if (node.data.userPrompt) {
+        messages.push({ role: 'user', content: node.data.userPrompt });
+      }
+      if (node.data.messages && Array.isArray(node.data.messages)) {
+        messages.push(...node.data.messages);
+      }
+      return {
+        ...baseJob,
+        node: {
+          type: 'LLM',
+          data: {
+            base_url: node.data.baseUrl || 'https://api.openai.com/v1',
+            api_key: node.data.apiKey || '',
+            model: node.data.model || 'gpt-4o',
+            messages: messages,
+            temperature: node.data.temperature,
+            max_tokens: node.data.maxTokens,
+            stream: node.data.stream ?? false,
+          },
         },
       };
     default:
-      return {
-        ...baseJob,
-        node: { type: 'UNKNOWN' },
-      };
+      console.warn(`Unknown node type for replay: ${node.type}`);
+      return null;
   }
 }
 

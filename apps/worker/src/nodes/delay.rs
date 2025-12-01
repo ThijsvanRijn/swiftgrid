@@ -1,10 +1,12 @@
 //! Delay node execution.
 //!
 //! Handles both short delays (inline sleep) and long delays (scheduled via Redis).
+//! Includes cancellation support for inline delays.
 
 use crate::types::DelayNodeData;
 use redis::{AsyncCommands, RedisResult};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 
 /// Short delay threshold (60 seconds).
 /// Delays shorter than this are executed inline.
@@ -13,22 +15,43 @@ const SHORT_DELAY_THRESHOLD_MS: u64 = 60_000;
 /// Redis sorted set for delayed jobs
 const DELAYED_JOBS_KEY: &str = "swiftgrid_delayed";
 
-/// Execute a delay node.
+/// Execute a delay node with cancellation support.
+/// Returns (status_code, body, was_cancelled).
 ///
-/// - Short delays (< 60s): Sleep inline
+/// - Short delays (< 60s): Sleep inline (cancellable)
 /// - Long delays (>= 60s): Schedule via Redis ZSET for later execution
 pub async fn execute(
     data: DelayNodeData,
     job_id: &str,
     run_id: &Option<String>,
     redis_client: &redis::Client,
-) -> (u16, Option<serde_json::Value>) {
+    cancel_token: &CancellationToken,
+) -> (u16, Option<serde_json::Value>, bool) {
     let delay_ms = data.duration_ms;
 
     if delay_ms <= SHORT_DELAY_THRESHOLD_MS {
-        // Short delay: sleep inline
-        println!("  → Sleeping for {}ms", delay_ms);
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        // Short delay: sleep inline with cancellation support
+        println!("  -> Sleeping for {}ms", delay_ms);
+        
+        tokio::select! {
+            biased;
+
+            _ = cancel_token.cancelled() => {
+                println!("  -> Delay cancelled");
+                return (
+                    499,
+                    Some(serde_json::json!({
+                        "error": "Delay cancelled",
+                        "delayed_ms": 0
+                    })),
+                    true,
+                );
+            }
+
+            _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
+                // Sleep completed normally
+            }
+        }
 
         (
             200,
@@ -36,9 +59,12 @@ pub async fn execute(
                 "delayed_ms": delay_ms,
                 "message": format!("Delayed for {}ms", delay_ms)
             })),
+            false,
         )
     } else {
         // Long delay: schedule for later via Redis ZSET
+        // Note: Long delays are handled by the scheduler, cancellation happens
+        // when the resume job is picked up (it will check run status)
         let resume_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -65,7 +91,7 @@ pub async fn execute(
         }
 
         println!(
-            "  → Scheduled delay for {}ms (resume at {})",
+            "  -> Scheduled delay for {}ms (resume at {})",
             delay_ms, resume_at
         );
 
@@ -77,6 +103,7 @@ pub async fn execute(
                 "resume_at": resume_at,
                 "delayed_ms": delay_ms
             })),
+            false, // Not cancelled - just scheduled
         )
     }
 }

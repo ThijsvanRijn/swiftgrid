@@ -95,6 +95,14 @@
           </svg>
           <span class="text-[9px] font-medium text-red-500 leading-none">Error</span>
         </div>
+      {:else if data.status === 'cancelled'}
+        <div class="flex items-center gap-1 px-1.5 bg-amber-500/10 border border-amber-200 h-5" title="Cancelled">
+          <svg class="w-2.5 h-2.5 text-amber-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M8 12h8"/>
+          </svg>
+          <span class="text-[9px] font-medium text-amber-500 leading-none">Cancelled</span>
+        </div>
       {/if}
     </div>
   

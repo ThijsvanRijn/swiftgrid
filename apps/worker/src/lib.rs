@@ -10,7 +10,9 @@
 //! - `retry`: Exponential backoff retry logic
 //! - `scheduler`: Background job scheduler
 //! - `nodes`: Node type execution handlers
+//! - `cancellation`: Real-time cancellation via Redis pub/sub
 
+pub mod cancellation;
 pub mod events;
 pub mod nodes;
 pub mod retry;
@@ -19,6 +21,7 @@ pub mod streaming;
 pub mod types;
 
 // Re-export commonly used items
+pub use cancellation::CancellationRegistry;
 pub use events::{log_event, EventType};
 pub use retry::{calculate_backoff, is_retryable_error};
 pub use streaming::StreamContext;

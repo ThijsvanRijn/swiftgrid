@@ -77,7 +77,7 @@ function updateNodeData(key: keyof AppNodeData, value: any) {
 }
 
 // Updates node status + optional result data
-function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | 'error', resultBody?: any) {
+function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | 'error' | 'cancelled', resultBody?: any) {
 	nodes = nodes.map((n) => {
 		if (n.id === id) {
 			const newResult = resultBody !== undefined ? { body: resultBody } : n.data.result;

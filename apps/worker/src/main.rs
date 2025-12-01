@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 // Import from library modules
 use swiftgrid_worker::{
+    cancellation::{self, CancellationRegistry},
     events::{log_event, EventType},
     nodes::{self, code::run_js_safely, JsTask},
     retry::{calculate_backoff, is_retryable_error},
@@ -23,6 +24,7 @@ use swiftgrid_worker::{
     streaming::StreamContext,
     types::{ExecutionResult, NodeType, WorkerJob},
 };
+use tokio_util::sync::CancellationToken;
 
 // =============================================================================
 // CONSTANTS
@@ -102,6 +104,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let in_flight = Arc::new(AtomicUsize::new(0));
 
+    // Cancellation registry (shared across all jobs)
+    let cancel_registry = Arc::new(CancellationRegistry::new());
+
+    // Spawn the cancellation listener (Redis pub/sub)
+    let cancel_redis = redis_client.clone();
+    let cancel_registry_listener = cancel_registry.clone();
+    tokio::spawn(async move {
+        cancellation::listen_for_cancellations(cancel_redis, cancel_registry_listener).await;
+    });
+
     // Spawn the scheduler loop
     let scheduler_redis = redis_client.clone();
     let scheduler_db = db_pool.clone();
@@ -130,12 +142,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let pool = db_pool.clone();
                     let j_sender = js_sender.clone();
                     let in_flight_clone = Arc::clone(&in_flight);
+                    let cancel_reg = cancel_registry.clone();
                     let group = group_name.to_string();
 
                     in_flight.fetch_add(1, Ordering::SeqCst);
 
                     tokio::spawn(async move {
-                        process_job(job, h_client, r_client, pool, j_sender, msg_id, group).await;
+                        process_job(job, h_client, r_client, pool, j_sender, msg_id, group, cancel_reg).await;
                         in_flight_clone.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
@@ -205,14 +218,30 @@ async fn process_job(
     js_sender: mpsc::Sender<JsTask>,
     msg_id: String,
     group_name: String,
+    cancel_registry: Arc<CancellationRegistry>,
 ) {
     let start = Instant::now();
     let job_id = job.id.clone();
     let job_isolated = job.isolated;
     let run_id = job.run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
 
+    // Get or create cancellation token for this run
+    let cancel_token = if let Some(ref rid) = run_id {
+        cancel_registry.get_or_create(*rid).await
+    } else {
+        CancellationToken::new() // Isolated jobs get their own token (never cancelled)
+    };
+
     // Check if run is still active before processing
     if let Some(ref rid) = run_id {
+        // Check if already cancelled via token (fast path)
+        if cancel_token.is_cancelled() {
+            println!("  -> Skipping node {} - run {} is cancelled (token)", job_id, rid);
+            ack_message(&redis_client, &group_name, &msg_id).await;
+            return;
+        }
+
+        // Check DB status (handles cancellations that happened before we subscribed)
         let status_result: Result<Option<(String,)>, _> = sqlx::query_as(
             "SELECT status FROM workflow_runs WHERE id = $1"
         )
@@ -222,7 +251,7 @@ async fn process_job(
         
         if let Ok(Some((status,))) = status_result {
             if status == "cancelled" || status == "failed" {
-                println!("  → Skipping node {} - run {} is {}", job_id, rid, status);
+                println!("  -> Skipping node {} - run {} is {}", job_id, rid, status);
                 ack_message(&redis_client, &group_name, &msg_id).await;
                 return;
             }
@@ -242,8 +271,8 @@ async fn process_job(
     // Clone node for potential retry (before moving into execute_node)
     let node_clone = job.node.clone();
 
-    // Execute the node
-    let (status, body) = execute_node(
+    // Execute the node with cancellation support
+    let (status, body, was_cancelled) = execute_node(
         node_clone.clone(),
         &job_id,
         &job.run_id,
@@ -252,6 +281,7 @@ async fn process_job(
         &db_pool,
         &js_sender,
         stream_ctx.as_ref(),
+        &cancel_token,
     )
     .await;
 
@@ -263,9 +293,56 @@ async fn process_job(
             .map(|b| b.get("suspended").is_some())
             .unwrap_or(false);
 
+    // Handle cancelled nodes
+    if was_cancelled {
+        println!("  -> Node {} cancelled", job_id);
+        if let Some(ref rid) = run_id {
+            let _ = log_event(
+                &db_pool,
+                rid,
+                &job_id,
+                EventType::NodeCancelled,
+                serde_json::json!({
+                    "duration_ms": duration_ms,
+                    "message": "Execution cancelled by user"
+                }),
+            )
+            .await;
+        }
+        
+        // Publish cancelled result to SSE stream so UI updates
+        let receipt = ExecutionResult {
+            node_id: job_id.clone(),
+            run_id: job.run_id.clone(),
+            status_code: 499, // Client Closed Request - indicates cancellation
+            body: Some(serde_json::json!({ "error": "Cancelled by user" })),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            duration_ms,
+            isolated: job_isolated,
+        };
+
+        if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+            if let Ok(receipt_json) = serde_json::to_string(&receipt) {
+                let _: RedisResult<String> = con
+                    .xadd(STREAM_RESULTS, "*", &[("payload", receipt_json)])
+                    .await;
+            }
+        }
+        
+        ack_message(&redis_client, &group_name, &msg_id).await;
+        // Cleanup token if this was the last job for this run
+        if let Some(ref rid) = run_id {
+            cancel_registry.remove(rid).await;
+        }
+        return;
+    }
+
     // Handle suspended nodes
     if is_suspended {
-        println!("  → Node suspended, waiting for external trigger");
+        println!("  -> Node suspended, waiting for external trigger");
         ack_message(&redis_client, &group_name, &msg_id).await;
         return;
     }
@@ -307,6 +384,8 @@ async fn process_job(
 // NODE EXECUTION
 // =============================================================================
 
+/// Execute a node with cancellation support.
+/// Returns (status_code, body, was_cancelled).
 async fn execute_node(
     node: NodeType,
     job_id: &str,
@@ -316,31 +395,48 @@ async fn execute_node(
     db_pool: &PgPool,
     js_sender: &mpsc::Sender<JsTask>,
     stream_ctx: Option<&StreamContext>,
-) -> (u16, Option<serde_json::Value>) {
+    cancel_token: &CancellationToken,
+) -> (u16, Option<serde_json::Value>, bool) {
     match node {
-        NodeType::Http(data) => nodes::http::execute(http_client, data, stream_ctx).await,
-
-        NodeType::Code(data) => execute_code_node(data, js_sender).await,
-
-        NodeType::Delay(data) => {
-            nodes::delay::execute(data, job_id, run_id, redis_client).await
+        NodeType::Http(data) => {
+            let result = nodes::http::execute(http_client, data, stream_ctx, cancel_token).await;
+            (result.0, result.1, result.2)
         }
 
-        NodeType::DelayResume(data) => nodes::delay::execute_resume(data.original_delay_ms),
+        NodeType::Code(data) => {
+            let (status, body) = execute_code_node(data, js_sender).await;
+            (status, body, false) // Code execution doesn't support cancellation yet
+        }
+
+        NodeType::Delay(data) => {
+            nodes::delay::execute(data, job_id, run_id, redis_client, cancel_token).await
+        }
+
+        NodeType::DelayResume(data) => {
+            let (status, body) = nodes::delay::execute_resume(data.original_delay_ms);
+            (status, body, false)
+        }
 
         NodeType::WebhookWait(data) => {
             let rid = run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
-            nodes::webhook::execute_wait(data, job_id, rid.as_ref(), db_pool).await
+            let (status, body) = nodes::webhook::execute_wait(data, job_id, rid.as_ref(), db_pool).await;
+            (status, body, false) // Webhook wait is a suspension, not cancellable mid-execution
         }
 
         NodeType::WebhookResume(data) => {
             let rid = run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
-            nodes::webhook::execute_resume(data, job_id, rid.as_ref(), db_pool).await
+            let (status, body) = nodes::webhook::execute_resume(data, job_id, rid.as_ref(), db_pool).await;
+            (status, body, false)
         }
 
-        NodeType::Router(data) => nodes::router::execute(data),
+        NodeType::Router(data) => {
+            let (status, body) = nodes::router::execute(data);
+            (status, body, false) // Router is instant, no cancellation needed
+        }
 
-        NodeType::Llm(data) => nodes::llm::execute(http_client, data, stream_ctx).await,
+        NodeType::Llm(data) => {
+            nodes::llm::execute(http_client, data, stream_ctx, cancel_token).await
+        }
     }
 }
 

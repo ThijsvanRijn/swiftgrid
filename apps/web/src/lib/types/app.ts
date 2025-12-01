@@ -41,7 +41,7 @@ export type AppNodeData = {
     stream?: boolean;           // Enable streaming
 
     // UI State fields (Shared)
-    status?: 'idle' | 'running' | 'success' | 'error';
+    status?: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
     result?: any;
     [key: string]: unknown; // Required by Svelte Flow
 };

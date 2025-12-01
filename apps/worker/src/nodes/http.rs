@@ -1,16 +1,19 @@
 //! HTTP node execution.
 //!
-//! Makes HTTP requests with streaming progress updates.
+//! Makes HTTP requests with streaming progress updates and cancellation support.
 
 use crate::streaming::StreamContext;
 use crate::types::HttpNodeData;
+use tokio_util::sync::CancellationToken;
 
-/// Execute an HTTP request node.
+/// Execute an HTTP request node with cancellation support.
+/// Returns (status_code, body, was_cancelled).
 pub async fn execute(
     client: reqwest::Client,
     data: HttpNodeData,
     stream_ctx: Option<&StreamContext>,
-) -> (u16, Option<serde_json::Value>) {
+    cancel_token: &CancellationToken,
+) -> (u16, Option<serde_json::Value>, bool) {
     let method_str = format!("{:?}", data.method);
     let reqwest_method: reqwest::Method = method_str.parse().unwrap();
 
@@ -35,7 +38,22 @@ pub async fn execute(
         ctx.progress("Sending request...").await;
     }
 
-    match req.send().await {
+    // Execute with cancellation support using tokio::select!
+    let result = tokio::select! {
+        biased; // Check cancellation first
+
+        _ = cancel_token.cancelled() => {
+            // Cancelled before or during request
+            if let Some(ctx) = stream_ctx {
+                ctx.progress("Cancelled").await;
+            }
+            return (499, Some(serde_json::json!({ "error": "Request cancelled" })), true);
+        }
+
+        result = req.send() => result
+    };
+
+    match result {
         Ok(resp) => {
             let status = resp.status().as_u16();
 
@@ -47,6 +65,14 @@ pub async fn execute(
                     resp.status().canonical_reason().unwrap_or("")
                 ))
                 .await;
+            }
+
+            // Check cancellation before reading body
+            if cancel_token.is_cancelled() {
+                if let Some(ctx) = stream_ctx {
+                    ctx.progress("Cancelled").await;
+                }
+                return (499, Some(serde_json::json!({ "error": "Request cancelled" })), true);
             }
 
             let text = resp.text().await.unwrap_or_default();
@@ -66,7 +92,7 @@ pub async fn execute(
                 ctx.complete().await;
             }
 
-            (status, body)
+            (status, body, false)
         }
         Err(e) => {
             let status = if e.is_timeout() {
@@ -82,7 +108,7 @@ pub async fn execute(
                 ctx.error(&e.to_string()).await;
             }
 
-            (status, Some(serde_json::json!({ "error": e.to_string() })))
+            (status, Some(serde_json::json!({ "error": e.to_string() })), false)
         }
     }
 }
