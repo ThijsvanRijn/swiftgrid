@@ -8,6 +8,7 @@
 	import WebhookConfig from './config/WebhookConfig.svelte';
 	import LlmConfig from './config/LlmConfig.svelte';
 	import RouterConfig from './config/RouterConfig.svelte';
+	import SubFlowConfig from './config/SubFlowConfig.svelte';
 </script>
 
 {#if flowStore.selectedNode}
@@ -24,6 +25,8 @@
 			<LlmConfig />
 		{:else if flowStore.selectedNode.type === 'router'}
 			<RouterConfig />
+		{:else if flowStore.selectedNode.type === 'subflow'}
+			<SubFlowConfig />
 		{/if}
 	</div>
 {/if}

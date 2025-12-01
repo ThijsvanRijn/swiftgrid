@@ -51,7 +51,7 @@ async function migrateExistingWorkflows() {
       // Create v1 from current graph
       const [newVersion] = await sql<Version[]>`
         INSERT INTO workflow_versions (workflow_id, version_number, graph, change_summary, created_by)
-        VALUES (${workflow.id}, 1, ${JSON.stringify(workflow.graph)}::jsonb, 'Initial version (auto-migrated)', 'system:migration')
+        VALUES (${workflow.id}, 1, ${sql.json(workflow.graph)}, 'Initial version (auto-migrated)', 'system:migration')
         RETURNING id
       `;
 

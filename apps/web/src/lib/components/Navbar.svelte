@@ -19,6 +19,7 @@
 		onAddWebhookWaitNode: () => void;
 		onAddRouterNode: () => void;
 		onAddLlmNode: () => void;
+		onAddSubFlowNode: () => void;
 		onSave: () => void;
 		onRun: () => void;
 		onOpenHistory: () => void;
@@ -37,7 +38,8 @@
 		onAddDelayNode, 
 		onAddWebhookWaitNode, 
 		onAddRouterNode, 
-		onAddLlmNode, 
+		onAddLlmNode,
+		onAddSubFlowNode,
 		onSave, 
 		onRun, 
 		onOpenHistory, 
@@ -146,6 +148,12 @@
 			class="px-3 py-1.5 text-xs font-medium rounded-none text-cyan-500 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
 		>
 			+ LLM
+		</button>
+		<button
+			onclick={onAddSubFlowNode}
+			class="px-3 py-1.5 text-xs font-medium rounded-none text-violet-500 hover:text-violet-400 hover:bg-violet-500/10 transition-colors"
+		>
+			+ Sub-Flow
 		</button>
 
 		<div class="w-px h-5 bg-border mx-1"></div>

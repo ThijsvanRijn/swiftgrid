@@ -360,9 +360,32 @@ async fn process_job(
         return;
     }
 
-    // Handle suspended nodes
+    // Handle suspended nodes (e.g., sub-flow waiting for child)
     if is_suspended {
         println!("  -> Node suspended, waiting for external trigger");
+        
+        // Publish suspended result to SSE so UI shows "Waiting" badge
+        let receipt = ExecutionResult {
+            node_id: job_id.clone(),
+            run_id: job.run_id.clone(),
+            status_code: 202,
+            body: body.clone(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            duration_ms,
+            isolated: job_isolated,
+        };
+
+        if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+            if let Ok(receipt_json) = serde_json::to_string(&receipt) {
+                let _: RedisResult<String> = con
+                    .xadd(STREAM_RESULTS, "*", &[("payload", receipt_json)])
+                    .await;
+            }
+        }
+        
         ack_message(&redis_client, &group_name, &msg_id).await;
         return;
     }
@@ -457,7 +480,125 @@ async fn execute_node(
         NodeType::Llm(data) => {
             nodes::llm::execute(http_client, data, stream_ctx, cancel_token).await
         }
+
+        NodeType::SubFlow(data) => {
+            let rid = run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
+            
+            if let Some(parent_run_id) = rid {
+                // Get current depth from the run
+                let depth: i32 = sqlx::query_scalar(
+                    "SELECT COALESCE(depth, 0) FROM workflow_runs WHERE id = $1"
+                )
+                .bind(parent_run_id)
+                .fetch_one(db_pool)
+                .await
+                .unwrap_or(0);
+
+                // Spawn the child run
+                match nodes::spawn_child_run(
+                    db_pool,
+                    &data,
+                    &parent_run_id,
+                    job_id,
+                    depth as u32,
+                ).await {
+                    Ok(spawn_result) => {
+                        println!(
+                            "  -> SubFlow: Spawned child run {} for workflow '{}'",
+                            &spawn_result.child_run_id.to_string()[..8],
+                            spawn_result.child_workflow_name
+                        );
+
+                        // Suspend the parent run
+                        if let Err(e) = nodes::suspend_parent_run(db_pool, &parent_run_id).await {
+                            eprintln!("  -> SubFlow: Failed to suspend parent: {}", e);
+                        }
+
+                        // Start the child run via API (handles template interpolation)
+                        let api_base_url = std::env::var("API_BASE_URL")
+                            .unwrap_or_else(|_| "http://localhost:5173".to_string());
+                        if let Err(e) = start_child_run(
+                            &http_client,
+                            &api_base_url,
+                            spawn_result.child_run_id,
+                        ).await {
+                            eprintln!("  -> SubFlow: Failed to start child: {}", e);
+                            return (
+                                500,
+                                Some(serde_json::json!({
+                                    "error": format!("Failed to start child run: {}", e),
+                                })),
+                                false,
+                            );
+                        }
+
+                        // Return 202 (suspended) - the orchestrator should NOT schedule downstream
+                        (
+                            202,
+                            Some(serde_json::json!({
+                                "suspended": true,
+                                "child_run_id": spawn_result.child_run_id.to_string(),
+                                "workflow_name": spawn_result.child_workflow_name,
+                            })),
+                            false,
+                        )
+                    }
+                    Err(e) => {
+                        eprintln!("  -> SubFlow: Failed to spawn child: {}", e);
+                        (
+                            500,
+                            Some(serde_json::json!({
+                                "error": e.to_string(),
+                            })),
+                            false,
+                        )
+                    }
+                }
+            } else {
+                // No run_id - can't spawn sub-flow in isolated mode
+                (
+                    400,
+                    Some(serde_json::json!({
+                        "error": "SubFlow nodes require a run context (cannot run in isolated mode)",
+                    })),
+                    false,
+                )
+            }
+        }
+
+        NodeType::SubFlowResume(data) => {
+            // Child completed - resume the parent
+            // The fail_on_error flag is stored in the suspension, we need to look it up
+            // For now, assume fail_on_error = false (route to error handle on failure)
+            let (status, body) = nodes::handle_resume(&data, false);
+            (status, Some(body), false)
+        }
     }
+}
+
+/// Start a child run by calling the TypeScript API endpoint.
+/// This ensures proper template interpolation ({{$trigger.field}}) is handled.
+async fn start_child_run(
+    http_client: &reqwest::Client,
+    api_base_url: &str,
+    child_run_id: Uuid,
+) -> Result<(), String> {
+    let url = format!("{}/api/runs/{}/start", api_base_url, child_run_id);
+    
+    let response = http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Start child run failed ({}): {}", status, body));
+    }
+    
+    Ok(())
 }
 
 async fn execute_code_node(

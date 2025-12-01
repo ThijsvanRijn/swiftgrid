@@ -40,8 +40,16 @@ export type AppNodeData = {
     maxTokens?: number;         // Max response tokens
     stream?: boolean;           // Enable streaming
 
+    // Sub-Flow Node Fields
+    subflowWorkflowId?: number;      // ID of the workflow to execute
+    subflowVersionId?: string;       // UUID of the pinned version (null = use active)
+    subflowVersionNumber?: number;   // Display: "v2"
+    subflowName?: string;            // Display: workflow name
+    subflowInput?: any;              // JSON input to pass: {{previous.data}} or literal
+    subflowFailOnError?: boolean;    // If true, parent fails when sub-flow fails
+
     // UI State fields (Shared)
-    status?: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
+    status?: 'idle' | 'running' | 'success' | 'error' | 'cancelled' | 'suspended';
     result?: any;
     [key: string]: unknown; // Required by Svelte Flow
 };

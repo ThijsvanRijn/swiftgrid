@@ -83,7 +83,7 @@ export const workflowRuns = pgTable('workflow_runs', {
   // Immutable snapshot of the graph at run time (flow versioning!)
   snapshotGraph: jsonb('snapshot_graph').notNull(),
   
-  // Run status: pending → running → completed | failed | cancelled
+  // Run status: pending → running → completed | failed | cancelled | suspended
   status: text('status').notNull().default('pending'),
   
   // Trigger source: 'manual', 'webhook', 'schedule', 'subflow'
@@ -95,6 +95,15 @@ export const workflowRuns = pgTable('workflow_runs', {
   // Final output (optional, for quick access)
   outputData: jsonb('output_data'),
   
+  // === Sub-Flow Parent Linking ===
+  // If this run was spawned by a SubFlowNode, these link back to the parent
+  parentRunId: uuid('parent_run_id'),  // The parent run waiting for us
+  parentNodeId: text('parent_node_id'), // The specific SubFlowNode in parent that's suspended
+  
+  // Recursion depth (0 = top-level, increments for each nested sub-flow)
+  // Hard limit of 10 to prevent infinite recursion
+  depth: integer('depth').default(0),
+  
   // Pinned runs are exempt from TTL cleanup
   pinned: boolean('pinned').default(false),
   
@@ -105,7 +114,8 @@ export const workflowRuns = pgTable('workflow_runs', {
   index('idx_workflow_runs_status').on(table.status),
   index('idx_workflow_runs_workflow_id').on(table.workflowId),
   index('idx_workflow_runs_created').on(table.createdAt),
-  index('idx_workflow_runs_version').on(table.workflowVersionId)
+  index('idx_workflow_runs_version').on(table.workflowVersionId),
+  index('idx_workflow_runs_parent').on(table.parentRunId)  // Fast lookup for child completion
 ]);
 
 // =============================================================================

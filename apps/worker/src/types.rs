@@ -167,6 +167,61 @@ pub struct LlmNodeData {
 }
 
 // =============================================================================
+// SUBFLOW NODE
+// =============================================================================
+
+fn default_depth_limit() -> u32 {
+    10
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SubFlowNodeData {
+    /// Workflow ID to execute
+    pub workflow_id: i32,
+    /// Pinned version ID (null = use active published version)
+    #[serde(default)]
+    pub version_id: Option<String>,
+    /// Input data to pass to the sub-flow (JSON or template)
+    #[typeshare(serialized_as = "any")]
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// If true, parent fails when sub-flow fails (otherwise routes to error handle)
+    #[serde(default)]
+    pub fail_on_error: bool,
+    /// Current depth (for recursion limit)
+    #[serde(default)]
+    pub current_depth: u32,
+    /// Max depth before failing (default: 10)
+    #[serde(default = "default_depth_limit")]
+    pub depth_limit: u32,
+    /// Timeout in milliseconds (0 = no timeout)
+    #[serde(default)]
+    pub timeout_ms: u64,
+    /// Output mapping - extract specific fields from child output (e.g., "result.data")
+    #[serde(default)]
+    pub output_path: Option<String>,
+    /// Maximum retry attempts for the sub-flow (0 = no retries)
+    #[serde(default)]
+    pub max_retries: u32,
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SubFlowResumeData {
+    /// The child run ID that completed
+    pub child_run_id: String,
+    /// Output from the child run
+    #[typeshare(serialized_as = "any")]
+    pub output: Option<serde_json::Value>,
+    /// Whether the child succeeded
+    pub success: bool,
+    /// Error message if failed
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+// =============================================================================
 // NODE TYPE ENUM
 // =============================================================================
 
@@ -183,6 +238,8 @@ pub enum NodeType {
     WebhookResume(WebhookResumeData),
     Router(RouterNodeData),
     Llm(LlmNodeData),
+    SubFlow(SubFlowNodeData),
+    SubFlowResume(SubFlowResumeData),
 }
 
 // =============================================================================

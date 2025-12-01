@@ -77,7 +77,7 @@ function updateNodeData(key: keyof AppNodeData, value: any) {
 }
 
 // Updates node status + optional result data
-function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | 'error' | 'cancelled', resultBody?: any) {
+function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | 'error' | 'cancelled' | 'suspended', resultBody?: any) {
 	nodes = nodes.map((n) => {
 		if (n.id === id) {
 			const newResult = resultBody !== undefined ? { body: resultBody } : n.data.result;
@@ -91,7 +91,9 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 							? 'border-green-500!'
 							: status === 'error'
 								? 'border-red-500!'
-								: '',
+								: status === 'suspended'
+									? 'border-amber-500!'
+									: '',
 				data: { ...n.data, status, result: newResult }
 			};
 		}
@@ -100,7 +102,7 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 }
 
 // Adds a new node at the given position (or random fallback)
-function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm', position?: { x: number; y: number }) {
+function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm' | 'subflow', position?: { x: number; y: number }) {
 	const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
 
 	let newNode: AppNode;
@@ -173,6 +175,24 @@ function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | '
 				userPrompt: '',
 				temperature: 1,
 				stream: true,
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else if (type === 'subflow') {
+		// Sub-Flow node - executes another workflow
+		newNode = {
+			id: generateId(),
+			type: 'subflow',
+			data: {
+				label: 'Sub-Flow',
+				description: 'Execute sub-flow',
+				subflowWorkflowId: undefined,  // To be selected
+				subflowVersionId: undefined,   // Pinned version (null = use active)
+				subflowVersionNumber: undefined,
+				subflowName: undefined,
+				subflowInput: '{{prev}}',  // Default: pass previous node's output
+				subflowFailOnError: false,
 				status: 'idle'
 			},
 			position: position ?? fallbackPosition

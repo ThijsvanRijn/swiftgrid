@@ -46,6 +46,7 @@ pub async fn run(redis_client: redis::Client, db_pool: PgPool) {
             // Run these in parallel
             tokio::join!(
                 check_expired_suspensions(&db_pool),
+                check_subflow_timeouts(&db_pool, &redis_client),
                 check_scheduled_workflows(&db_pool, &redis_client)
             );
         }
@@ -147,6 +148,134 @@ async fn check_expired_suspensions(pool: &PgPool) {
         )
         .bind(serde_json::json!({"timeout": true}))
         .bind(&suspension_id)
+        .execute(pool)
+        .await;
+    }
+}
+
+/// Check for sub-flow timeouts and fail the parent node.
+async fn check_subflow_timeouts(pool: &PgPool, redis_client: &redis::Client) {
+    // Find sub-flow suspensions that have timed out
+    let timed_out: Vec<(Uuid, String, Uuid, serde_json::Value)> = match sqlx::query_as(
+        r#"
+        SELECT id, node_id, run_id, execution_context FROM suspensions 
+        WHERE resumed_at IS NULL 
+          AND suspension_type = 'subflow'
+          AND resume_after IS NOT NULL 
+          AND resume_after < NOW()
+        LIMIT 10
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Scheduler: Failed to query sub-flow timeouts: {}", e);
+            return;
+        }
+    };
+
+    if timed_out.is_empty() {
+        return;
+    }
+
+    println!(
+        "Scheduler: Found {} sub-flow timeout(s) to process",
+        timed_out.len()
+    );
+
+    let Ok(mut con) = redis_client.get_multiplexed_async_connection().await else {
+        eprintln!("Scheduler: Failed to connect to Redis for sub-flow timeouts");
+        return;
+    };
+
+    for (suspension_id, node_id, parent_run_id, context) in timed_out {
+        let child_run_id = context.get("child_run_id").and_then(|v| v.as_str()).unwrap_or("");
+        let _fail_on_error = context.get("fail_on_error").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        println!(
+            "Scheduler: Sub-flow timeout for node {} in run {} (child: {})",
+            node_id, parent_run_id, child_run_id
+        );
+
+        // Check if child run has already completed
+        let child_status: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM workflow_runs WHERE id = $1"
+        )
+        .bind(Uuid::parse_str(child_run_id).ok())
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some((status,)) = child_status {
+            if status == "completed" || status == "failed" || status == "cancelled" {
+                // Child already finished, just mark suspension as resolved
+                let _ = sqlx::query(
+                    "UPDATE suspensions SET resumed_at = NOW(), resumed_by = 'scheduler:child_finished' WHERE id = $1"
+                )
+                .bind(&suspension_id)
+                .execute(pool)
+                .await;
+                continue;
+            }
+        }
+
+        // Cancel the child run
+        if let Ok(child_uuid) = Uuid::parse_str(child_run_id) {
+            let _ = sqlx::query(
+                "UPDATE workflow_runs SET status = 'cancelled', completed_at = NOW() WHERE id = $1"
+            )
+            .bind(&child_uuid)
+            .execute(pool)
+            .await;
+
+            // Publish cancellation signal
+            let _: RedisResult<i32> = con.publish(format!("cancel:{}", child_run_id), "timeout").await;
+        }
+
+        // Resume the parent with timeout error
+        let resume_job = serde_json::json!({
+            "id": node_id,
+            "run_id": parent_run_id.to_string(),
+            "node": {
+                "type": "SUBFLOWRESUME",
+                "data": {
+                    "child_run_id": child_run_id,
+                    "output": null,
+                    "success": false,
+                    "error": "Sub-flow timed out"
+                }
+            },
+            "retry_count": 0,
+            "max_retries": 0
+        });
+
+        let _: RedisResult<String> = con
+            .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", resume_job.to_string())])
+            .await;
+
+        // Mark suspension as resolved
+        let _ = sqlx::query(
+            r#"
+            UPDATE suspensions 
+            SET resumed_at = NOW(), 
+                resumed_by = 'scheduler:timeout',
+                resume_payload = $1
+            WHERE id = $2
+            "#,
+        )
+        .bind(serde_json::json!({"timeout": true, "child_run_id": child_run_id}))
+        .bind(&suspension_id)
+        .execute(pool)
+        .await;
+
+        // Update parent run status back to running
+        let _ = sqlx::query(
+            "UPDATE workflow_runs SET status = 'running' WHERE id = $1"
+        )
+        .bind(&parent_run_id)
         .execute(pool)
         .await;
     }

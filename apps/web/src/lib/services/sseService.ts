@@ -54,13 +54,22 @@ function connect() {
     // Handle 'result' events (node completions)
     eventSource.addEventListener('result', (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
-        const isSuccess = result.status_code >= 200 && result.status_code < 300;
+        const isSuspended = result.status_code === 202 && result.body?.suspended;
+        const isSuccess = result.status_code >= 200 && result.status_code < 300 && !isSuspended;
         const isCancelled = result.status_code === 499;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         const isolatedInfo = result.isolated ? ' (isolated)' : '';
-        const statusIcon = isCancelled ? '-' : (isSuccess ? '✓' : '✗');
+        const statusIcon = isCancelled ? '-' : isSuspended ? '⏸' : (isSuccess ? '✓' : '✗');
         console.log(`SSE: Node ${result.node_id} ${statusIcon}${durationInfo}${isolatedInfo}`);
+        
+        // Handle suspended nodes (sub-flow waiting for child)
+        if (isSuspended) {
+            import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+                flowStore.updateNodeStatus(result.node_id, 'suspended', result.body);
+            });
+            return;
+        }
         
         // Don't trigger downstream for isolated runs or cancelled nodes
         if (!result.isolated && !isCancelled) {
@@ -98,13 +107,22 @@ function connect() {
     // Fallback for unnamed events (backwards compatibility)
     eventSource.onmessage = (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
-        const isSuccess = result.status_code >= 200 && result.status_code < 300;
+        const isSuspended = result.status_code === 202 && result.body?.suspended;
+        const isSuccess = result.status_code >= 200 && result.status_code < 300 && !isSuspended;
         const isCancelled = result.status_code === 499;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         const isolatedInfo = result.isolated ? ' (isolated)' : '';
-        const statusIcon = isCancelled ? '-' : (isSuccess ? '✓' : '✗');
+        const statusIcon = isCancelled ? '-' : isSuspended ? '⏸' : (isSuccess ? '✓' : '✗');
         console.log(`SSE: Node ${result.node_id} ${statusIcon}${durationInfo}${isolatedInfo}`);
+        
+        // Handle suspended nodes (sub-flow waiting for child)
+        if (isSuspended) {
+            import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+                flowStore.updateNodeStatus(result.node_id, 'suspended', result.body);
+            });
+            return;
+        }
         
         // Don't trigger downstream for isolated runs or cancelled nodes
         if (!result.isolated && !isCancelled) {

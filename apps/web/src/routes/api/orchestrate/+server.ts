@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
-import { workflowRuns, runEvents, secrets } from '$lib/server/db/schema';
+import { workflowRuns, runEvents, secrets, suspensions } from '$lib/server/db/schema';
 import { REDIS_STREAMS, EVENT_TYPES } from '@swiftgrid/shared';
-import { eq, and, inArray } from 'drizzle-orm';
+import { eq, and, inArray, isNull } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 
 const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
@@ -175,6 +175,22 @@ export async function POST({ request }) {
         }
     }
     
+    // If the completed node was a SubFlow, route to success or error handle based on child result
+    if (completedNode?.type === 'subflow') {
+        const nodeOutput = nodeOutputs.get(nodeId);
+        const routeTo = nodeOutput?.route_to; // 'error' if child failed with fail_on_error=false
+        
+        if (routeTo === 'error') {
+            // Child failed - route to error handle only
+            dependentEdges = dependentEdges.filter(e => e.sourceHandle === 'error');
+            console.log(`SubFlow ${nodeId} routing to error handle (child failed)`);
+        } else {
+            // Child succeeded - route to success handle only
+            dependentEdges = dependentEdges.filter(e => !e.sourceHandle || e.sourceHandle === 'success');
+            console.log(`SubFlow ${nodeId} routing to success handle`);
+        }
+    }
+    
     const nextNodeIds = dependentEdges.map(e => e.target);
     
     if (nextNodeIds.length === 0) {
@@ -203,11 +219,32 @@ export async function POST({ request }) {
             const hasFailed = failedNodeIds.size > 0;
             const finalStatus = hasFailed ? 'failed' : 'completed';
             
-            // Update run status
+            // Collect final output from leaf nodes
+            const leafNodeIds = nodes
+                .filter(n => !edges.some(e => e.source === n.id))
+                .map(n => n.id);
+            
+            let outputData: any = null;
+            if (leafNodeIds.length === 1) {
+                // Single leaf node - use its output
+                outputData = nodeOutputs.get(leafNodeIds[0]) || null;
+            } else if (leafNodeIds.length > 1) {
+                // Multiple leaf nodes - return map of all outputs
+                outputData = {};
+                for (const leafId of leafNodeIds) {
+                    const output = nodeOutputs.get(leafId);
+                    if (output !== undefined) {
+                        outputData[leafId] = output;
+                    }
+                }
+            }
+            
+            // Update run status and output
             await db.update(workflowRuns)
                 .set({ 
                     status: finalStatus,
-                    completedAt: new Date()
+                    completedAt: new Date(),
+                    outputData: outputData
                 })
                 .where(eq(workflowRuns.id, runId));
             
@@ -217,11 +254,146 @@ export async function POST({ request }) {
                 eventType: hasFailed ? EVENT_TYPES.RUN_FAILED : EVENT_TYPES.RUN_COMPLETED,
                 payload: {
                     completedNodes: [...completedNodeIds],
-                    failedNodes: [...failedNodeIds]
+                    failedNodes: [...failedNodeIds],
+                    output: outputData
                 }
             });
             
             console.log(`Orchestrator: Run ${runId} ${finalStatus}`);
+            
+            // Check if this run has a parent (sub-flow case)
+            if (run.parentRunId && run.parentNodeId) {
+                console.log(`Orchestrator: Resuming parent run ${run.parentRunId} node ${run.parentNodeId}`);
+                
+                // Look up the suspension to get output_path for mapping and retry info
+                const [suspension] = await db.select()
+                    .from(suspensions)
+                    .where(and(
+                        eq(suspensions.runId, run.parentRunId),
+                        eq(suspensions.nodeId, run.parentNodeId),
+                        eq(suspensions.suspensionType, 'subflow'),
+                        isNull(suspensions.resumedAt)
+                    ))
+                    .limit(1);
+                
+                const context = (suspension?.executionContext || {}) as {
+                    output_path?: string;
+                    max_retries?: number;
+                    retry_count?: number;
+                    workflow_id?: number;
+                    version_id?: string;
+                    input?: any;
+                    timeout_ms?: number;
+                    depth_limit?: number;
+                    fail_on_error?: boolean;
+                };
+                
+                // Check if we should retry on failure
+                const maxRetries = context.max_retries || 0;
+                const retryCount = context.retry_count || 0;
+                
+                if (hasFailed && retryCount < maxRetries && suspension) {
+                    // Retry the sub-flow
+                    console.log(`Orchestrator: Retrying sub-flow (attempt ${retryCount + 1}/${maxRetries})`);
+                    
+                    // Update retry count in suspension
+                    const newContext = { ...context, retry_count: retryCount + 1 };
+                    await db.update(suspensions)
+                        .set({ executionContext: newContext })
+                        .where(eq(suspensions.id, suspension.id));
+                    
+                    // Push a new SubFlow job to spawn another child
+                    const retryJob = {
+                        id: run.parentNodeId,
+                        run_id: run.parentRunId,
+                        node: {
+                            type: 'SUBFLOW',
+                            data: {
+                                workflow_id: context.workflow_id,
+                                version_id: context.version_id || null,
+                                input: context.input,
+                                fail_on_error: context.fail_on_error || false,
+                                current_depth: run.depth || 0,
+                                depth_limit: context.depth_limit || 10,
+                                timeout_ms: context.timeout_ms || 0,
+                                output_path: context.output_path || null,
+                                max_retries: 0 // Don't nest retries
+                            }
+                        },
+                        retry_count: retryCount + 1,
+                        max_retries: 0
+                    };
+                    
+                    await redis.xadd(
+                        REDIS_STREAMS.JOBS,
+                        '*',
+                        'payload',
+                        JSON.stringify(retryJob)
+                    );
+                    
+                    return json({ message: 'Sub-flow retry scheduled', retry: retryCount + 1 });
+                }
+                
+                // Apply output mapping if configured
+                let finalOutput = outputData;
+                if (!hasFailed && context.output_path && outputData) {
+                    // Navigate the path (e.g., "result.data.items")
+                    const pathParts = context.output_path.split('.');
+                    let value: any = outputData;
+                    for (const part of pathParts) {
+                        if (value && typeof value === 'object' && part in value) {
+                            value = value[part];
+                        } else {
+                            console.warn(`Output mapping: path "${context.output_path}" not found in output`);
+                            value = outputData; // Fall back to full output
+                            break;
+                        }
+                    }
+                    finalOutput = value;
+                    console.log(`Orchestrator: Applied output mapping "${context.output_path}"`);
+                }
+                
+                // Mark suspension as resolved
+                if (suspension) {
+                    await db.update(suspensions)
+                        .set({
+                            resumedAt: new Date(),
+                            resumedBy: 'orchestrator:child_completed',
+                            resumePayload: { child_run_id: runId, success: !hasFailed, retries: retryCount }
+                        })
+                        .where(eq(suspensions.id, suspension.id));
+                }
+                
+                // Push a SubFlowResume job to wake up the parent
+                const resumeJob = {
+                    id: run.parentNodeId,
+                    run_id: run.parentRunId,
+                    node: {
+                        type: 'SUBFLOWRESUME',
+                        data: {
+                            child_run_id: runId,
+                            output: finalOutput,
+                            success: !hasFailed,
+                            error: hasFailed ? 'Sub-flow failed' : null
+                        }
+                    },
+                    retry_count: 0,
+                    max_retries: 0
+                };
+                
+                await redis.xadd(
+                    REDIS_STREAMS.JOBS,
+                    '*',
+                    'payload',
+                    JSON.stringify(resumeJob)
+                );
+                
+                // Update parent run status back to running
+                await db.update(workflowRuns)
+                    .set({ status: 'running' })
+                    .where(eq(workflowRuns.id, run.parentRunId));
+            }
+            
             return json({ message: `Run ${finalStatus}`, status: finalStatus });
         }
         
@@ -263,7 +435,7 @@ export async function POST({ request }) {
     const scheduledNodeIds: string[] = [];
     
     for (const node of nodesToSchedule) {
-        const job = buildJobFromNode(node, runId, secretMap, nodeOutputs);
+        const job = buildJobFromNode(node, runId, secretMap, nodeOutputs, run.inputData);
         if (job) {
             // Log NODE_SCHEDULED event
             await db.insert(runEvents).values({
@@ -298,7 +470,8 @@ function buildJobFromNode(
     node: any, 
     runId: string, 
     secretMap: Map<string, string>,
-    nodeOutputs: Map<string, any>
+    nodeOutputs: Map<string, any>,
+    triggerData?: any // Input data passed to the run (webhook payload, subflow input, etc.)
 ): object | null {
     const processString = (str: string) => {
         return str.replace(/{{(.*?)}}/g, (match, variablePath) => {
@@ -308,6 +481,24 @@ function buildJobFromNode(
             if (cleanPath.startsWith('$env.')) {
                 const keyName = cleanPath.replace('$env.', '');
                 return secretMap.get(keyName) || match;
+            }
+            
+            // Handle trigger/input data: {{$trigger.field}} or {{$input.field}}
+            if (cleanPath.startsWith('$trigger.') || cleanPath.startsWith('$input.')) {
+                const fieldPath = cleanPath.replace(/^\$(trigger|input)\./, '');
+                if (triggerData !== undefined && triggerData !== null) {
+                    const pathParts = fieldPath.split('.');
+                    let value: any = triggerData;
+                    for (const part of pathParts) {
+                        if (value && typeof value === 'object' && part in value) {
+                            value = value[part];
+                        } else {
+                            return match; // Path not found, keep original
+                        }
+                    }
+                    return typeof value === 'string' ? value : JSON.stringify(value);
+                }
+                return match;
             }
             
             // Handle node output references: {{nodeId.field}} or {{nodeId.field.nested}}
@@ -508,6 +699,51 @@ function buildJobFromNode(
             },
             retry_count: 0,
             max_retries: 3
+        };
+    }
+    
+    if (node.type === 'subflow') {
+        // Process input through variable interpolation
+        let finalInput = node.data.subflowInput;
+        if (finalInput) {
+            if (typeof finalInput === 'string') {
+                finalInput = processString(finalInput);
+                // Try to parse as JSON if it looks like JSON
+                try {
+                    finalInput = JSON.parse(finalInput);
+                } catch {
+                    // Keep as string if not valid JSON
+                }
+            } else {
+                const inputStr = JSON.stringify(finalInput);
+                const resolvedStr = processString(inputStr);
+                try {
+                    finalInput = JSON.parse(resolvedStr);
+                } catch {
+                    finalInput = resolvedStr;
+                }
+            }
+        }
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'SUBFLOW',
+                data: {
+                    workflow_id: node.data.subflowWorkflowId,
+                    version_id: node.data.subflowVersionId || null,
+                    input: finalInput,
+                    fail_on_error: node.data.subflowFailOnError || false,
+                    current_depth: 0, // Will be set by worker based on parent run
+                    depth_limit: 10,
+                    timeout_ms: node.data.subflowTimeoutMs || 0,
+                    output_path: node.data.subflowOutputPath || null,
+                    max_retries: node.data.subflowMaxRetries || 0
+                }
+            },
+            retry_count: 0,
+            max_retries: 0 // Sub-flow node itself doesn't retry, child runs do
         };
     }
     

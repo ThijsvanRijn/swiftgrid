@@ -15,6 +15,10 @@
 		completedAt: string | null;
 		durationMs: number | null;
 		error: string | null;
+		// Sub-flow parent linking
+		parentRunId?: string | null;
+		parentNodeId?: string | null;
+		depth?: number | null;
 	}
 
 	interface RunDetails {
@@ -406,6 +410,8 @@
 											run.status === 'failed' ? 'bg-red-500/20 text-red-500' :
 											run.status === 'running' ? 'bg-blue-500/20 text-blue-500' :
 											run.status === 'pending' ? 'bg-amber-500/20 text-amber-500' :
+											run.status === 'suspended' ? 'bg-violet-500/20 text-violet-500' :
+											run.status === 'cancelled' ? 'bg-gray-500/20 text-gray-500' :
 											'bg-muted/50 text-muted-foreground'
 										}`}>
 											{run.status}
@@ -431,6 +437,20 @@
 									</div>
 								{/if}
 
+								<!-- Sub-flow indicator -->
+								{#if run.parentRunId}
+									<button
+										onclick={() => viewRunDetails(run.parentRunId!)}
+										class="flex items-center gap-1 text-[10px] text-violet-500 bg-violet-500/10 px-1.5 py-0.5 rounded-sm mb-1.5 hover:bg-violet-500/20 transition-colors"
+										title="View parent run"
+									>
+										<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+											<path d="M9 18l6-6-6-6"/>
+										</svg>
+										<span>Sub-flow of {run.parentRunId.slice(0, 8)}</span>
+									</button>
+								{/if}
+
 								<!-- Middle row: Trigger, Version, Duration -->
 								<div class="flex items-center gap-2 text-[10px] text-muted-foreground mb-2">
 									<span class="px-1.5 py-0.5 bg-sidebar-accent/50 rounded-sm">
@@ -446,6 +466,12 @@
 											Draft
 										</span>
 									{/if}
+									<!-- Depth indicator for nested sub-flows -->
+									{#if run.depth && run.depth > 0}
+										<span class="px-1.5 py-0.5 bg-violet-500/20 text-violet-500 rounded-sm font-medium" title="Nesting depth">
+											L{run.depth}
+										</span>
+									{/if}
 									<span>
 										{formatDuration(run.durationMs)}
 									</span>
@@ -453,6 +479,11 @@
 										<span class="flex items-center gap-1 text-blue-500">
 											<span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
 											Running
+										</span>
+									{:else if run.status === 'suspended'}
+										<span class="flex items-center gap-1 text-amber-500">
+											<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+											Waiting
 										</span>
 									{/if}
 								</div>

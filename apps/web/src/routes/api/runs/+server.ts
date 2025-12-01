@@ -65,6 +65,10 @@ export const GET: RequestHandler = async ({ url }) => {
       createdAt: workflowRuns.createdAt,
       startedAt: workflowRuns.startedAt,
       completedAt: workflowRuns.completedAt,
+      // Sub-flow parent linking
+      parentRunId: workflowRuns.parentRunId,
+      parentNodeId: workflowRuns.parentNodeId,
+      depth: workflowRuns.depth,
     })
       .from(workflowRuns)
       .leftJoin(workflows, eq(workflowRuns.workflowId, workflows.id))

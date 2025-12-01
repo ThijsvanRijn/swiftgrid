@@ -33,8 +33,8 @@ export const POST: RequestHandler = async ({ params }) => {
 
     const run = runs[0];
 
-    // Can only cancel running or pending runs
-    if (!['running', 'pending'].includes(run.status)) {
+    // Can only cancel running, pending, or suspended runs
+    if (!['running', 'pending', 'suspended'].includes(run.status)) {
       return json({ 
         error: `Cannot cancel run with status '${run.status}'` 
       }, { status: 400 });
@@ -76,7 +76,36 @@ export const POST: RequestHandler = async ({ params }) => {
     await redis.publish(`cancel:${runId}`, 'cancel');
     console.log(`Published cancellation signal for run ${runId}`);
 
-    return json({ success: true });
+    // Also cancel any child runs (sub-flows spawned by this run)
+    const childRuns = await db.select({ id: workflowRuns.id, status: workflowRuns.status })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.parentRunId, runId));
+    
+    for (const child of childRuns) {
+      if (['running', 'pending', 'suspended'].includes(child.status)) {
+        // Cancel child run
+        await db.update(workflowRuns)
+          .set({ status: 'cancelled', completedAt: new Date() })
+          .where(eq(workflowRuns.id, child.id));
+        
+        // Log cancellation event
+        await db.insert(runEvents).values({
+          runId: child.id,
+          eventType: 'RUN_CANCELLED',
+          payload: {
+            cancelledBy: 'parent',
+            parentRunId: runId,
+            previousStatus: child.status,
+          },
+        });
+        
+        // Publish cancellation signal for child
+        await redis.publish(`cancel:${child.id}`, 'cancel');
+        console.log(`Cascaded cancellation to child run ${child.id}`);
+      }
+    }
+
+    return json({ success: true, cancelledChildren: childRuns.length });
   } catch (e) {
     console.error('Failed to cancel run:', e);
     return json({ error: 'Failed to cancel run' }, { status: 500 });
