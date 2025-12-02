@@ -307,6 +307,93 @@ function buildJobFromNode(
         };
     }
     
+    if (node.type === 'subflow') {
+        let finalInput = node.data.subflowInput;
+        if (finalInput) {
+            if (typeof finalInput === 'string') {
+                finalInput = processString(finalInput);
+                try {
+                    finalInput = JSON.parse(finalInput);
+                } catch {
+                    // Keep as string
+                }
+            } else {
+                const inputStr = JSON.stringify(finalInput);
+                const resolvedStr = processString(inputStr);
+                try {
+                    finalInput = JSON.parse(resolvedStr);
+                } catch {
+                    finalInput = resolvedStr;
+                }
+            }
+        }
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'SUBFLOW',
+                data: {
+                    workflow_id: node.data.subflowWorkflowId,
+                    version_id: node.data.subflowVersionId || null,
+                    input: finalInput,
+                    fail_on_error: node.data.subflowFailOnError || false,
+                    current_depth: 0,
+                    depth_limit: 10,
+                    timeout_ms: node.data.subflowTimeoutMs || 0,
+                    output_path: node.data.subflowOutputPath || null,
+                    max_retries: node.data.subflowMaxRetries || 0
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
+        };
+    }
+    
+    if (node.type === 'map') {
+        let inputArray = node.data.mapInputArray;
+        let items: any[] = [];
+        
+        if (inputArray) {
+            if (typeof inputArray === 'string') {
+                inputArray = processString(inputArray);
+                try {
+                    const parsed = JSON.parse(inputArray);
+                    if (Array.isArray(parsed)) {
+                        items = parsed;
+                    } else {
+                        items = [parsed];
+                    }
+                } catch {
+                    items = [inputArray];
+                }
+            } else if (Array.isArray(inputArray)) {
+                items = inputArray;
+            } else {
+                items = [inputArray];
+            }
+        }
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'MAP',
+                data: {
+                    workflow_id: node.data.mapWorkflowId,
+                    version_id: node.data.mapVersionId || null,
+                    items: items,
+                    concurrency: node.data.mapConcurrency || 5,
+                    fail_fast: node.data.mapFailFast || false,
+                    current_depth: 0,
+                    depth_limit: 10
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
+        };
+    }
+    
     console.warn(`Unknown node type: ${node.type}`);
     return null;
 }

@@ -222,6 +222,68 @@ pub struct SubFlowResumeData {
 }
 
 // =============================================================================
+// MAP/ITERATOR NODE
+// =============================================================================
+
+fn default_concurrency() -> u32 {
+    5
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MapNodeData {
+    /// Workflow ID to execute for each item
+    pub workflow_id: i32,
+    /// Pinned version ID (null = use active published version)
+    #[serde(default)]
+    pub version_id: Option<String>,
+    /// Input array to iterate over
+    #[typeshare(serialized_as = "any")]
+    pub items: Vec<serde_json::Value>,
+    /// Max concurrent executions (default: 5)
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u32,
+    /// If true, stop on first failure
+    #[serde(default)]
+    pub fail_fast: bool,
+    /// Timeout in milliseconds for entire batch (null = no timeout)
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Current depth (for recursion limit)
+    #[serde(default)]
+    pub current_depth: u32,
+    /// Max depth before failing (default: 10)
+    #[serde(default = "default_depth_limit")]
+    pub depth_limit: u32,
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MapStepData {
+    /// Batch operation ID
+    pub batch_id: String,
+}
+
+#[typeshare]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MapChildCompleteData {
+    /// Batch operation ID
+    pub batch_id: String,
+    /// Item index in the original array (-1 = timeout marker)
+    pub item_index: i32,
+    /// Child run ID that completed
+    pub child_run_id: String,
+    /// Whether the child succeeded
+    pub success: bool,
+    /// Output from the child run
+    #[typeshare(serialized_as = "any")]
+    pub output: Option<serde_json::Value>,
+    /// Error message if failed
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+// =============================================================================
 // NODE TYPE ENUM
 // =============================================================================
 
@@ -240,6 +302,9 @@ pub enum NodeType {
     Llm(LlmNodeData),
     SubFlow(SubFlowNodeData),
     SubFlowResume(SubFlowResumeData),
+    Map(MapNodeData),
+    MapStep(MapStepData),
+    MapChildComplete(MapChildCompleteData),
 }
 
 // =============================================================================

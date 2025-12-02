@@ -9,6 +9,7 @@
 	import LlmConfig from './config/LlmConfig.svelte';
 	import RouterConfig from './config/RouterConfig.svelte';
 	import SubFlowConfig from './config/SubFlowConfig.svelte';
+	import MapConfig from './config/MapConfig.svelte';
 </script>
 
 {#if flowStore.selectedNode}
@@ -27,6 +28,8 @@
 			<RouterConfig />
 		{:else if flowStore.selectedNode.type === 'subflow'}
 			<SubFlowConfig />
+		{:else if flowStore.selectedNode.type === 'map'}
+			<MapConfig />
 		{/if}
 	</div>
 {/if}

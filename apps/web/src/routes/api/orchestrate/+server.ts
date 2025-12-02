@@ -45,6 +45,12 @@ async function evaluateRouterForRun(
                     }
                     return typeof value === 'string' ? value : JSON.stringify(value);
                 }
+            } else {
+                // No field path: {{nodeId}} - return entire node output
+                const nodeOutput = nodeOutputs.get(cleanPath);
+                if (nodeOutput !== undefined) {
+                    return typeof nodeOutput === 'string' ? nodeOutput : JSON.stringify(nodeOutput);
+                }
             }
             return match;
         });
@@ -191,6 +197,27 @@ export async function POST({ request }) {
         }
     }
     
+    // If the completed node was a Map, route to success or error handle based on batch result
+    if (completedNode?.type === 'map') {
+        const nodeOutput = nodeOutputs.get(nodeId);
+        const routeTo = nodeOutput?.route_to; // 'error' if all failed or fail_fast triggered
+        const stats = nodeOutput?.stats;
+        
+        if (routeTo === 'error') {
+            // Batch failed - route to error handle only
+            dependentEdges = dependentEdges.filter(e => e.sourceHandle === 'error');
+            console.log(`Map ${nodeId} routing to error handle (batch failed: ${stats?.failed}/${stats?.total})`);
+        } else {
+            // Batch succeeded (possibly with partial failures) - route to success handle
+            dependentEdges = dependentEdges.filter(e => !e.sourceHandle || e.sourceHandle === 'success');
+            if (stats?.failed > 0) {
+                console.log(`Map ${nodeId} routing to success handle (partial failures: ${stats.failed}/${stats.total})`);
+            } else {
+                console.log(`Map ${nodeId} routing to success handle (all succeeded: ${stats?.completed}/${stats?.total})`);
+            }
+        }
+    }
+    
     const nextNodeIds = dependentEdges.map(e => e.target);
     
     if (nextNodeIds.length === 0) {
@@ -214,6 +241,9 @@ export async function POST({ request }) {
         const doneNodeIds = new Set([...completedNodeIds, ...failedNodeIds]);
         
         const allDone = [...allNodeIds].every(id => doneNodeIds.has(id));
+        
+        console.log(`Orchestrator: Run ${runId} - allNodes: [${[...allNodeIds].join(', ')}], doneNodes: [${[...doneNodeIds].join(', ')}], allDone: ${allDone}`);
+        console.log(`Orchestrator: Run ${runId} - trigger: ${run.trigger}, parentRunId: ${run.parentRunId}, parentNodeId: ${run.parentNodeId}`);
         
         if (allDone) {
             const hasFailed = failedNodeIds.size > 0;
@@ -261,8 +291,50 @@ export async function POST({ request }) {
             
             console.log(`Orchestrator: Run ${runId} ${finalStatus}`);
             
-            // Check if this run has a parent (sub-flow case)
+            // Check if this run has a parent (sub-flow or map child case)
+            console.log(`Orchestrator: Checking parent - parentRunId: ${run.parentRunId}, parentNodeId: ${run.parentNodeId}, trigger: ${run.trigger}`);
             if (run.parentRunId && run.parentNodeId) {
+                // Check if this is a map child by looking at the trigger
+                console.log(`Orchestrator: Has parent! trigger=${run.trigger}, inputData=${JSON.stringify(run.inputData)}`);
+                if (run.trigger === 'map') {
+                    // This is a map child - send MapChildComplete job
+                    const inputData = run.inputData as { batch_id?: string; index?: number } | null;
+                    const batchId = inputData?.batch_id;
+                    const itemIndex = inputData?.index ?? 0;
+                    
+                    console.log(`Orchestrator: Map child - batchId=${batchId}, itemIndex=${itemIndex}`);
+                    if (batchId) {
+                        console.log(`Orchestrator: Map child completed for batch ${batchId} index ${itemIndex}`);
+                        
+                        const mapCompleteJob = {
+                            id: run.parentNodeId,
+                            run_id: run.parentRunId,
+                            node: {
+                                type: 'MAPCHILDCOMPLETE',
+                                data: {
+                                    batch_id: batchId,
+                                    item_index: itemIndex,
+                                    child_run_id: runId,
+                                    success: !hasFailed,
+                                    output: outputData,
+                                    error: hasFailed ? 'Map iteration failed' : null
+                                }
+                            },
+                            retry_count: 0,
+                            max_retries: 0
+                        };
+                        
+                        await redis.xadd(
+                            REDIS_STREAMS.JOBS,
+                            '*',
+                            'payload',
+                            JSON.stringify(mapCompleteJob)
+                        );
+                        
+                        return json({ message: 'Map child completion sent', batchId, itemIndex });
+                    }
+                }
+                
                 console.log(`Orchestrator: Resuming parent run ${run.parentRunId} node ${run.parentNodeId}`);
                 
                 // Look up the suspension to get output_path for mapping and retry info
@@ -406,7 +478,28 @@ export async function POST({ request }) {
     // Use the completedEvents we already fetched above
     const completedNodeIds = new Set(completedEvents.map(e => e.nodeId));
     
+    // Get nodes that have already been scheduled or are in progress (to avoid re-scheduling)
+    const allEvents = await db.select()
+        .from(runEvents)
+        .where(eq(runEvents.runId, runId));
+    
+    const alreadyScheduledOrRunning = new Set(
+        allEvents
+            .filter(e => 
+                e.eventType === EVENT_TYPES.NODE_SCHEDULED ||
+                e.eventType === EVENT_TYPES.NODE_STARTED ||
+                e.eventType === 'NODE_SUSPENDED' // Map/SubFlow nodes waiting for children
+            )
+            .map(e => e.nodeId)
+    );
+    
     for (const nextNodeId of nextNodeIds) {
+        // Skip nodes that are already scheduled, running, or suspended
+        if (alreadyScheduledOrRunning.has(nextNodeId) && !completedNodeIds.has(nextNodeId)) {
+            console.log(`Orchestrator: Node ${nextNodeId} already scheduled/running/suspended, skipping`);
+            continue;
+        }
+        
         // Find all edges pointing TO this node
         const incomingEdges = edges.filter(e => e.target === nextNodeId);
         const requiredNodeIds = incomingEdges.map(e => e.source);
@@ -435,7 +528,7 @@ export async function POST({ request }) {
     const scheduledNodeIds: string[] = [];
     
     for (const node of nodesToSchedule) {
-        const job = buildJobFromNode(node, runId, secretMap, nodeOutputs, run.inputData);
+        const job = buildJobFromNode(node, runId, secretMap, nodeOutputs, run.inputData, run.depth || 0);
         if (job) {
             // Log NODE_SCHEDULED event
             await db.insert(runEvents).values({
@@ -471,7 +564,8 @@ function buildJobFromNode(
     runId: string, 
     secretMap: Map<string, string>,
     nodeOutputs: Map<string, any>,
-    triggerData?: any // Input data passed to the run (webhook payload, subflow input, etc.)
+    triggerData?: any, // Input data passed to the run (webhook payload, subflow input, etc.)
+    runDepth: number = 0 // Current depth of the run (for nested Map/SubFlow limits)
 ): object | null {
     const processString = (str: string) => {
         return str.replace(/{{(.*?)}}/g, (match, variablePath) => {
@@ -501,9 +595,10 @@ function buildJobFromNode(
                 return match;
             }
             
-            // Handle node output references: {{nodeId.field}} or {{nodeId.field.nested}}
+            // Handle node output references: {{nodeId.field}} or {{nodeId.field.nested}} or {{nodeId}}
             const dotIndex = cleanPath.indexOf('.');
             if (dotIndex > 0) {
+                // Has a field path: {{nodeId.field}}
                 const refNodeId = cleanPath.substring(0, dotIndex);
                 const fieldPath = cleanPath.substring(dotIndex + 1);
                 
@@ -521,6 +616,12 @@ function buildJobFromNode(
                     }
                     // Return stringified value for JSON compatibility
                     return typeof value === 'string' ? value : JSON.stringify(value);
+                }
+            } else {
+                // No field path: {{nodeId}} - return entire node output
+                const nodeOutput = nodeOutputs.get(cleanPath);
+                if (nodeOutput !== undefined) {
+                    return typeof nodeOutput === 'string' ? nodeOutput : JSON.stringify(nodeOutput);
                 }
             }
             
@@ -744,6 +845,55 @@ function buildJobFromNode(
             },
             retry_count: 0,
             max_retries: 0 // Sub-flow node itself doesn't retry, child runs do
+        };
+    }
+    
+    if (node.type === 'map') {
+        // Process input array through variable interpolation
+        let inputArray = node.data.mapInputArray;
+        let items: any[] = [];
+        
+        if (inputArray) {
+            if (typeof inputArray === 'string') {
+                inputArray = processString(inputArray);
+                // Try to parse as JSON array
+                try {
+                    const parsed = JSON.parse(inputArray);
+                    if (Array.isArray(parsed)) {
+                        items = parsed;
+                    } else {
+                        // Wrap single value in array
+                        items = [parsed];
+                    }
+                } catch {
+                    // If not valid JSON, treat as single item
+                    items = [inputArray];
+                }
+            } else if (Array.isArray(inputArray)) {
+                items = inputArray;
+            } else {
+                items = [inputArray];
+            }
+        }
+        
+        return {
+            id: node.id,
+            run_id: runId,
+            node: {
+                type: 'MAP',
+                data: {
+                    workflow_id: node.data.mapWorkflowId,
+                    version_id: node.data.mapVersionId || null,
+                    items: items,
+                    concurrency: node.data.mapConcurrency || 5,
+                    fail_fast: node.data.mapFailFast || false,
+                    timeout_ms: node.data.mapTimeoutMs || null,
+                    current_depth: runDepth,
+                    depth_limit: node.data.mapDepthLimit || 10
+                }
+            },
+            retry_count: 0,
+            max_retries: 0
         };
     }
     

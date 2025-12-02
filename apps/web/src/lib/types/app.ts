@@ -48,6 +48,20 @@ export type AppNodeData = {
     subflowInput?: any;              // JSON input to pass: {{previous.data}} or literal
     subflowFailOnError?: boolean;    // If true, parent fails when sub-flow fails
 
+    // Map/Iterator Node Fields
+    mapWorkflowId?: number;          // ID of the workflow to execute for each item
+    mapVersionId?: string;           // UUID of the pinned version (null = use active)
+    mapVersionNumber?: number;       // Display: "v2"
+    mapWorkflowName?: string;        // Display: workflow name
+    mapInputArray?: string;          // Expression: "{{prev.items}}" or literal JSON array
+    mapConcurrency?: number;         // Max parallel executions (1-50, default 5)
+    mapFailFast?: boolean;           // If true, stops on first failure
+    
+    // Map Node Progress (updated via SSE)
+    mapProgress?: number;            // 0-1 progress
+    mapCompletedCount?: number;      // Completed iterations
+    mapTotalCount?: number;          // Total iterations
+
     // UI State fields (Shared)
     status?: 'idle' | 'running' | 'success' | 'error' | 'cancelled' | 'suspended';
     result?: any;

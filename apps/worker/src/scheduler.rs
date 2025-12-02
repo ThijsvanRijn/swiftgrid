@@ -47,6 +47,8 @@ pub async fn run(redis_client: redis::Client, db_pool: PgPool) {
             tokio::join!(
                 check_expired_suspensions(&db_pool),
                 check_subflow_timeouts(&db_pool, &redis_client),
+                check_batch_timeouts(&db_pool, &redis_client),
+                check_stale_batches(&db_pool, &redis_client),
                 check_scheduled_workflows(&db_pool, &redis_client)
             );
         }
@@ -281,6 +283,288 @@ async fn check_subflow_timeouts(pool: &PgPool, redis_client: &redis::Client) {
     }
 }
 
+/// Check for stale/stuck batch operations that may have lost their worker.
+/// A batch is considered stale if:
+/// - Status is 'running'
+/// - Created more than 60 seconds ago  
+/// - No batch_results created in the last 30 seconds
+/// - Items remaining to process but no active children (active_count = 0)
+async fn check_stale_batches(pool: &PgPool, redis_client: &redis::Client) {
+    // Find running batches that appear stuck
+    let stale: Vec<(Uuid, String, Uuid, i32, i32, i32, i32, i32)> = match sqlx::query_as(
+        r#"
+        SELECT bo.id, bo.node_id, bo.run_id, bo.total_items, bo.completed_count, 
+               bo.failed_count, bo.active_count, bo.current_index
+        FROM batch_operations bo
+        WHERE bo.status = 'running'
+          AND bo.created_at < NOW() - INTERVAL '60 seconds'
+          AND bo.active_count = 0
+          AND (bo.completed_count + bo.failed_count) < bo.total_items
+          AND NOT EXISTS (
+              SELECT 1 FROM batch_results br 
+              WHERE br.batch_id = bo.id 
+              AND br.created_at > NOW() - INTERVAL '30 seconds'
+          )
+        LIMIT 5
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Scheduler: Failed to query stale batches: {}", e);
+            return;
+        }
+    };
+
+    if stale.is_empty() {
+        return;
+    }
+
+    println!(
+        "Scheduler: Found {} stale batch(es) to recover",
+        stale.len()
+    );
+
+    let Ok(mut con) = redis_client.get_multiplexed_async_connection().await else {
+        eprintln!("Scheduler: Failed to connect to Redis for batch recovery");
+        return;
+    };
+
+    for (batch_id, node_id, run_id, total_items, completed_count, failed_count, _active_count, current_index) in stale {
+        let finished = completed_count + failed_count;
+        
+        if finished >= total_items {
+            // All items processed but batch not marked complete - push completion job
+            println!(
+                "Scheduler: Batch {} has all results ({}/{}), triggering completion",
+                batch_id, finished, total_items
+            );
+            
+            // Send a special completion trigger
+            let complete_job = serde_json::json!({
+                "id": node_id,
+                "run_id": run_id.to_string(),
+                "node": {
+                    "type": "MAPCHILDCOMPLETE",
+                    "data": {
+                        "batch_id": batch_id.to_string(),
+                        "child_run_id": "00000000-0000-0000-0000-000000000000",
+                        "item_index": -1,  // Trigger completion check
+                        "success": true,
+                        "output": null,
+                        "error": null
+                    }
+                },
+                "retry_count": 0,
+                "max_retries": 0,
+                "isolated": false
+            });
+            
+            let _: RedisResult<String> = con
+                .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", complete_job.to_string())])
+                .await;
+        } else if current_index < total_items {
+            // More items to process - push a MAPSTEP to resume spawning
+            println!(
+                "Scheduler: Recovering stale batch {} for node {} ({}/{} completed, spawning more)",
+                batch_id, node_id, finished, total_items
+            );
+            
+            let step_job = serde_json::json!({
+                "id": node_id,
+                "run_id": run_id.to_string(),
+                "node": {
+                    "type": "MAPSTEP",
+                    "data": {
+                        "batch_id": batch_id.to_string()
+                    }
+                },
+                "retry_count": 0,
+                "max_retries": 0,
+                "isolated": false
+            });
+            
+            let _: RedisResult<String> = con
+                .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", step_job.to_string())])
+                .await;
+        } else {
+            // All items spawned but not all completed - children may be stuck
+            // Check for orphaned child runs
+            let orphaned: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*) FROM workflow_runs 
+                WHERE parent_run_id = $1 
+                AND status IN ('pending', 'running')
+                AND created_at < NOW() - INTERVAL '120 seconds'
+                "#
+            )
+            .bind(&run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+            
+            if orphaned > 0 {
+                println!(
+                    "Scheduler: Batch {} has {} orphaned children, marking as failed",
+                    batch_id, orphaned
+                );
+                
+                // Mark orphaned children as failed
+                let _ = sqlx::query(
+                    r#"
+                    UPDATE workflow_runs 
+                    SET status = 'failed', completed_at = NOW()
+                    WHERE parent_run_id = $1 
+                    AND status IN ('pending', 'running')
+                    AND created_at < NOW() - INTERVAL '120 seconds'
+                    "#
+                )
+                .bind(&run_id)
+                .execute(pool)
+                .await;
+                
+                // Push completion job to finalize batch with partial results
+                let complete_job = serde_json::json!({
+                    "id": node_id,
+                    "run_id": run_id.to_string(),
+                    "node": {
+                        "type": "MAPCHILDCOMPLETE", 
+                        "data": {
+                            "batch_id": batch_id.to_string(),
+                            "child_run_id": "00000000-0000-0000-0000-000000000000",
+                            "item_index": -1,
+                            "success": false,
+                            "output": null,
+                            "error": "Child runs orphaned/stuck"
+                        }
+                    },
+                    "retry_count": 0,
+                    "max_retries": 0,
+                    "isolated": false
+                });
+                
+                let _: RedisResult<String> = con
+                    .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", complete_job.to_string())])
+                    .await;
+            }
+        }
+    }
+}
+
+/// Check for batch operations that have timed out.
+/// A batch times out if it has a timeout_ms set and created_at + timeout_ms < NOW()
+async fn check_batch_timeouts(pool: &PgPool, redis_client: &redis::Client) {
+    // Find running batches that have exceeded their timeout
+    let timed_out: Vec<(Uuid, String, Uuid, i32, i32, i32, i32)> = match sqlx::query_as(
+        r#"
+        SELECT id, node_id, run_id, total_items, completed_count, failed_count, active_count
+        FROM batch_operations 
+        WHERE status = 'running'
+          AND timeout_ms IS NOT NULL 
+          AND created_at + (timeout_ms || ' milliseconds')::interval < NOW()
+        LIMIT 10
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Scheduler: Failed to query batch timeouts: {}", e);
+            return;
+        }
+    };
+
+    if timed_out.is_empty() {
+        return;
+    }
+
+    println!(
+        "Scheduler: Found {} batch timeout(s) to process",
+        timed_out.len()
+    );
+
+    let Ok(mut con) = redis_client.get_multiplexed_async_connection().await else {
+        eprintln!("Scheduler: Failed to connect to Redis for batch timeouts");
+        return;
+    };
+
+    for (batch_id, node_id, run_id, total_items, completed_count, failed_count, active_count) in timed_out {
+        println!(
+            "Scheduler: Batch timeout for node {} in run {} ({}/{} completed, {} active)",
+            node_id, run_id, completed_count, total_items, active_count
+        );
+
+        // Mark batch as timed_out
+        let _ = sqlx::query(
+            "UPDATE batch_operations SET status = 'timed_out', completed_at = NOW() WHERE id = $1"
+        )
+        .bind(&batch_id)
+        .execute(pool)
+        .await;
+
+        // Cancel active child runs
+        let _ = sqlx::query(
+            r#"
+            UPDATE workflow_runs 
+            SET status = 'cancelled', completed_at = NOW() 
+            WHERE parent_run_id = $1 
+              AND status IN ('pending', 'running')
+            "#
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await;
+
+        // Create a MAPCHILDCOMPLETE event to finalize the batch with timeout error
+        // This will aggregate partial results and route appropriately
+        let timeout_job = serde_json::json!({
+            "id": node_id,
+            "run_id": run_id.to_string(),
+            "node": {
+                "type": "MAPCHILDCOMPLETE",
+                "data": {
+                    "batch_id": batch_id.to_string(),
+                    "child_run_id": "00000000-0000-0000-0000-000000000000",
+                    "item_index": -1,  // Special marker for timeout
+                    "success": false,
+                    "output": null,
+                    "error": "Batch operation timed out"
+                }
+            },
+            "retry_count": 0,
+            "max_retries": 0,
+            "isolated": false
+        });
+
+        // Log the timeout event
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO run_events (run_id, node_id, event_type, payload)
+            VALUES ($1, $2, 'NODE_FAILED', $3)
+            "#,
+        )
+        .bind(&run_id)
+        .bind(&node_id)
+        .bind(serde_json::json!({
+            "error": "Batch operation timed out",
+            "batch_id": batch_id.to_string(),
+            "completed": completed_count,
+            "failed": failed_count,
+            "total": total_items
+        }))
+        .execute(pool)
+        .await;
+
+        // Push the completion job to finalize results
+        let _: RedisResult<String> = con
+            .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", timeout_job.to_string())])
+            .await;
+    }
+}
+
 /// Check for scheduled workflows that are due to run.
 /// Uses the active published version if available, otherwise falls back to draft.
 async fn check_scheduled_workflows(pool: &PgPool, redis_client: &redis::Client) {
@@ -395,9 +679,9 @@ async fn check_scheduled_workflows(pool: &PgPool, redis_client: &redis::Client) 
             // Warn when running unpublished workflow - this shouldn't happen after migration
             eprintln!(
                 "Scheduler: Starting cron run for '{}' (run_id: {}) using DRAFT - no published version exists!",
-                name,
+            name,
                 &run_id.to_string()[..8]
-            );
+        );
         }
 
         // Insert the workflow run (with version ID if using published version)

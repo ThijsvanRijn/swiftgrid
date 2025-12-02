@@ -70,21 +70,21 @@ pub async fn log_event_with_retry(
     Ok(())
 }
 
-/// Check if a node execution attempt has already completed or failed.
-/// Used for idempotency: prevents re-execution after worker crash.
+/// Check if a node execution attempt has already completed, failed, or is suspended.
+/// Used for idempotency: prevents re-execution after worker crash or duplicate scheduling.
 pub async fn has_node_completed(
     pool: &PgPool,
     run_id: &Uuid,
     node_id: &str,
     retry_count: u32,
 ) -> Result<bool, sqlx::Error> {
-    let result: Option<(i64,)> = sqlx::query_as(
+    let result: Option<(i32,)> = sqlx::query_as(
         r#"
         SELECT 1 FROM run_events 
         WHERE run_id = $1 
           AND node_id = $2 
           AND retry_count = $3
-          AND event_type IN ('NODE_COMPLETED', 'NODE_FAILED', 'NODE_CANCELLED')
+          AND event_type IN ('NODE_COMPLETED', 'NODE_FAILED', 'NODE_CANCELLED', 'NODE_SUSPENDED')
         LIMIT 1
         "#,
     )

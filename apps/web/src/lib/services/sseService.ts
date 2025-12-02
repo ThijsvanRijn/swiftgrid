@@ -54,33 +54,84 @@ function connect() {
     // Handle 'result' events (node completions)
     eventSource.addEventListener('result', (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
-        const isSuspended = result.status_code === 202 && result.body?.suspended;
-        const isSuccess = result.status_code >= 200 && result.status_code < 300 && !isSuspended;
+        // Check for SubFlow suspension (has 'suspended' field)
+        const isSubFlowSuspended = result.status_code === 202 && result.body?.suspended;
+        // Check for Map node suspension (has 'batch_id' field - initial spawn)
+        // Check for Map progress updates FIRST (has 'batch_id' and 'progress' fields)
+        const isMapProgress = result.status_code === 202 && result.body?.batch_id && result.body?.progress !== undefined;
+        // Map initial suspension (running status but NO progress yet)
+        const isMapSuspended = result.status_code === 202 && result.body?.batch_id && result.body?.status === 'running' && !isMapProgress;
+        // Check for any map-related lifecycle event (has batch_id) - these are internal state updates
+        const isMapLifecycleEvent = result.status_code === 202 && result.body?.batch_id;
+        // Map batch completion (status 200 with results array)
+        const isMapComplete = result.status_code === 200 && result.body?.results && result.body?.stats;
+        // Combined suspension check
+        const isSuspended = isSubFlowSuspended || isMapSuspended;
+        const isSuccess = result.status_code >= 200 && result.status_code < 300 && !isSuspended && !isMapProgress && !isMapLifecycleEvent;
         const isCancelled = result.status_code === 499;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         const isolatedInfo = result.isolated ? ' (isolated)' : '';
-        const statusIcon = isCancelled ? '-' : isSuspended ? '⏸' : (isSuccess ? '✓' : '✗');
+        const statusIcon = isCancelled ? '-' : isSuspended || isMapProgress || isMapLifecycleEvent ? '⏸' : (isSuccess ? '✓' : '✗');
         console.log(`SSE: Node ${result.node_id} ${statusIcon}${durationInfo}${isolatedInfo}`);
         
-        // Handle suspended nodes (sub-flow waiting for child)
-        if (isSuspended) {
+        // Handle map progress updates FIRST (with progress field)
+        if (isMapProgress) {
             import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
-                flowStore.updateNodeStatus(result.node_id, 'suspended', result.body);
+                flowStore.updateNodeStatus(result.node_id, 'suspended', {
+                    ...result.body,
+                    mapProgress: result.body.progress,
+                    mapCompletedCount: result.body.completed,
+                    mapTotalCount: result.body.total
+                });
             });
             return;
         }
         
-        // Don't trigger downstream for isolated runs or cancelled nodes
-        if (!result.isolated && !isCancelled) {
-            handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
-        } else {
-            // Just update the node status, don't orchestrate
+        // Handle suspended nodes (sub-flow or map initial waiting for children)
+        if (isSuspended) {
             import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
-                const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
-                flowStore.updateNodeStatus(result.node_id, status as any, result.body);
+                // For map initial suspension, extract the total count
+                const isMapInitial = result.body?.batch_id && result.body?.total;
+                flowStore.updateNodeStatus(result.node_id, 'suspended', {
+                    ...result.body,
+                    ...(isMapInitial && {
+                        mapCompletedCount: 0,
+                        mapTotalCount: result.body.total,
+                        mapProgress: 0
+                    })
+                });
             });
+            return;
         }
+        
+        // Handle other map lifecycle events (spawned, no_slots, skipped, etc.)
+        // These are internal state updates - don't change the node status, just ignore
+        if (isMapLifecycleEvent && !isMapComplete) {
+            // Silently ignore intermediate lifecycle events to prevent flickering
+            return;
+        }
+        
+        // Handle map batch completion
+        if (isMapComplete) {
+            import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+                flowStore.updateNodeStatus(result.node_id, 'success', result.body);
+            });
+            return;
+        }
+        
+        // Update node status in the UI
+        // Note: For tracked runs (with run_id), the worker already calls the orchestrator
+        // so we only need to update the UI here, not trigger downstream scheduling
+        import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+            const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
+            flowStore.updateNodeStatus(result.node_id, status as any, result.body);
+            
+            // For isolated runs without run_id (test/preview mode), we still need to orchestrate from frontend
+            if (!result.isolated && !isCancelled && !result.run_id) {
+                handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+            }
+        });
     });
 
     // Handle 'chunk' events (streaming output)
@@ -107,32 +158,74 @@ function connect() {
     // Fallback for unnamed events (backwards compatibility)
     eventSource.onmessage = (event) => {
         const result: ExecutionResult = JSON.parse(event.data);
+        // Check for Map progress updates FIRST (has 'batch_id' and 'progress' fields)
+        const isMapProgress = result.status_code === 202 && result.body?.batch_id && result.body?.progress !== undefined;
         const isSuspended = result.status_code === 202 && result.body?.suspended;
-        const isSuccess = result.status_code >= 200 && result.status_code < 300 && !isSuspended;
+        const isMapLifecycleEvent = result.status_code === 202 && result.body?.batch_id && !isMapProgress;
+        const isMapComplete = result.status_code === 200 && result.body?.results && result.body?.stats;
+        const isSuccess = result.status_code >= 200 && result.status_code < 300 && !isSuspended && !isMapProgress && !isMapLifecycleEvent;
         const isCancelled = result.status_code === 499;
         
         const durationInfo = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
         const isolatedInfo = result.isolated ? ' (isolated)' : '';
-        const statusIcon = isCancelled ? '-' : isSuspended ? '⏸' : (isSuccess ? '✓' : '✗');
+        const statusIcon = isCancelled ? '-' : isSuspended || isMapProgress || isMapLifecycleEvent ? '⏸' : (isSuccess ? '✓' : '✗');
         console.log(`SSE: Node ${result.node_id} ${statusIcon}${durationInfo}${isolatedInfo}`);
         
-        // Handle suspended nodes (sub-flow waiting for child)
-        if (isSuspended) {
+        // Handle map progress updates FIRST
+        if (isMapProgress) {
             import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
-                flowStore.updateNodeStatus(result.node_id, 'suspended', result.body);
+                flowStore.updateNodeStatus(result.node_id, 'suspended', {
+                    ...result.body,
+                    mapProgress: result.body.progress,
+                    mapCompletedCount: result.body.completed,
+                    mapTotalCount: result.body.total
+                });
             });
             return;
         }
         
-        // Don't trigger downstream for isolated runs or cancelled nodes
-        if (!result.isolated && !isCancelled) {
-            handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
-        } else {
+        // Handle suspended nodes (sub-flow waiting for child)
+        if (isSuspended) {
             import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
-                const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
-                flowStore.updateNodeStatus(result.node_id, status as any, result.body);
+                // For map initial suspension, extract the total count
+                const isMapInitial = result.body?.batch_id && result.body?.total;
+                flowStore.updateNodeStatus(result.node_id, 'suspended', {
+                    ...result.body,
+                    ...(isMapInitial && {
+                        mapCompletedCount: 0,
+                        mapTotalCount: result.body.total,
+                        mapProgress: 0
+                    })
+                });
             });
+            return;
         }
+        
+        // Ignore other map lifecycle events (spawned, no_slots, etc.) to prevent flickering
+        if (isMapLifecycleEvent && !isMapComplete) {
+            return;
+        }
+        
+        // Handle map batch completion
+        if (isMapComplete) {
+            import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+                flowStore.updateNodeStatus(result.node_id, 'success', result.body);
+            });
+            return;
+        }
+        
+        // Update node status in the UI
+        // Note: For tracked runs (with run_id), the worker already calls the orchestrator
+        // so we only need to update the UI here, not trigger downstream scheduling
+        import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
+            const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
+            flowStore.updateNodeStatus(result.node_id, status as any, result.body);
+            
+            // For isolated runs without run_id (test/preview mode), we still need to orchestrate from frontend
+            if (!result.isolated && !isCancelled && !result.run_id) {
+                handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
+            }
+        });
     };
 
     eventSource.onerror = () => {

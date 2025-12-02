@@ -69,10 +69,10 @@ pub async fn execute(
         }
 
         result = client
-            .post(&endpoint)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", data.api_key))
-            .json(&request_body)
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", data.api_key))
+        .json(&request_body)
             .send() => result
     };
 

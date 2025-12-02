@@ -1,4 +1,4 @@
-import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, index, boolean, unique } from 'drizzle-orm/pg-core';
+import { pgTable, serial, text, jsonb, timestamp, uuid, integer, bigserial, index, boolean, unique, primaryKey } from 'drizzle-orm/pg-core';
 
 // =============================================================================
 // WORKFLOWS - The flow definitions (nodes + edges)
@@ -263,6 +263,70 @@ export const webhookDeliveries = pgTable('webhook_deliveries', {
 }, (table) => [
   index('idx_webhook_deliveries_idempotency').on(table.workflowId, table.idempotencyKey),
   index('idx_webhook_deliveries_workflow').on(table.workflowId)
+]);
+
+// =============================================================================
+// BATCH OPERATIONS - Control state for Map/Iterator nodes
+// =============================================================================
+// Small, frequently updated table with atomic counters
+// Separate from data to avoid write contention
+export const batchOperations = pgTable('batch_operations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  runId: uuid('run_id').references(() => workflowRuns.id, { onDelete: 'cascade' }).notNull(),
+  nodeId: text('node_id').notNull(),
+  
+  // Configuration (immutable after creation)
+  totalItems: integer('total_items').notNull(),
+  concurrencyLimit: integer('concurrency_limit').notNull().default(5),
+  failFast: boolean('fail_fast').notNull().default(false),
+  timeoutMs: integer('timeout_ms'),  // Per-item timeout in milliseconds (null = no timeout)
+  
+  // The input array (stored for reference)
+  inputItems: jsonb('input_items').notNull(),
+  
+  // Child workflow reference
+  childWorkflowId: integer('child_workflow_id').notNull(),
+  childVersionId: uuid('child_version_id'),  // Pinned version (null = use active)
+  
+  // State (updated atomically)
+  currentIndex: integer('current_index').notNull().default(0),  // Cursor for spawning next batch
+  activeCount: integer('active_count').notNull().default(0),    // Currently running children
+  completedCount: integer('completed_count').notNull().default(0),
+  failedCount: integer('failed_count').notNull().default(0),
+  
+  // Status: 'running', 'completed', 'failed', 'cancelled'
+  status: text('status').notNull().default('running'),
+  
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  completedAt: timestamp('completed_at', { withTimezone: true })
+}, (table) => [
+  index('idx_batch_operations_run_node').on(table.runId, table.nodeId),
+  index('idx_batch_operations_status').on(table.status)
+]);
+
+// =============================================================================
+// BATCH RESULTS - Append-only results storage
+// =============================================================================
+// High throughput: each child completion is an INSERT, never UPDATE
+// No locking contention even with high concurrency
+export const batchResults = pgTable('batch_results', {
+  batchId: uuid('batch_id').references(() => batchOperations.id, { onDelete: 'cascade' }).notNull(),
+  itemIndex: integer('item_index').notNull(),  // Original position in input array (for ordering)
+  
+  // Child run reference
+  childRunId: uuid('child_run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+  
+  // Result status: 'completed', 'failed'
+  status: text('status').notNull(),
+  
+  // Output data from child run (or error details)
+  output: jsonb('output'),
+  errorMessage: text('error_message'),
+  
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow()
+}, (table) => [
+  // Composite primary key for ON CONFLICT support
+  primaryKey({ columns: [table.batchId, table.itemIndex] })
 ]);
 
 // =============================================================================

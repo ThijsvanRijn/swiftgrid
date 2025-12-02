@@ -81,6 +81,11 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 	nodes = nodes.map((n) => {
 		if (n.id === id) {
 			const newResult = resultBody !== undefined ? { body: resultBody } : n.data.result;
+			
+			// Extract map progress data if present
+			const mapProgress = resultBody?.mapProgress ?? n.data.mapProgress;
+			const mapCompletedCount = resultBody?.mapCompletedCount ?? n.data.mapCompletedCount;
+			const mapTotalCount = resultBody?.mapTotalCount ?? n.data.mapTotalCount;
 
 			return {
 				...n,
@@ -93,8 +98,16 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 								? 'border-red-500!'
 								: status === 'suspended'
 									? 'border-amber-500!'
-									: '',
-				data: { ...n.data, status, result: newResult }
+								: '',
+				data: { 
+					...n.data, 
+					status, 
+					result: newResult,
+					// Update map progress if available
+					mapProgress,
+					mapCompletedCount,
+					mapTotalCount
+				}
 			};
 		}
 		return n;
@@ -102,7 +115,7 @@ function updateNodeStatus(id: string, status: 'idle' | 'running' | 'success' | '
 }
 
 // Adds a new node at the given position (or random fallback)
-function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm' | 'subflow', position?: { x: number; y: number }) {
+function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm' | 'subflow' | 'map', position?: { x: number; y: number }) {
 	const fallbackPosition = { x: Math.random() * 400, y: Math.random() * 400 };
 
 	let newNode: AppNode;
@@ -193,6 +206,25 @@ function addNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | '
 				subflowName: undefined,
 				subflowInput: '{{prev}}',  // Default: pass previous node's output
 				subflowFailOnError: false,
+				status: 'idle'
+			},
+			position: position ?? fallbackPosition
+		};
+	} else if (type === 'map') {
+		// Map/Iterator node - executes workflow for each item in array
+		newNode = {
+			id: generateId(),
+			type: 'map',
+			data: {
+				label: 'Map',
+				description: 'Iterate over array',
+				mapWorkflowId: undefined,      // To be selected
+				mapVersionId: undefined,       // Pinned version (null = use active)
+				mapVersionNumber: undefined,
+				mapWorkflowName: undefined,
+				mapInputArray: '{{prev.items}}',  // Default: iterate over previous node's items
+				mapConcurrency: 5,             // Default: 5 parallel executions
+				mapFailFast: false,            // Default: continue on error
 				status: 'idle'
 			},
 			position: position ?? fallbackPosition

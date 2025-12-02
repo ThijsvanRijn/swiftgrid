@@ -37,6 +37,7 @@
 	import RouterNodeComponent from '$lib/components/nodes/RouterNode.svelte';
 	import LLMNodeComponent from '$lib/components/nodes/LLMNode.svelte';
 	import SubFlowNodeComponent from '$lib/components/nodes/SubFlowNode.svelte';
+	import MapNodeComponent from '$lib/components/nodes/MapNode.svelte';
 	import FlowInit from '$lib/components/FlowInit.svelte';
 
 	const nodeTypes = {
@@ -46,7 +47,8 @@
 		'webhook-wait': WebhookWaitNodeComponent,
 		'router': RouterNodeComponent,
 		'llm': LLMNodeComponent,
-		'subflow': SubFlowNodeComponent
+		'subflow': SubFlowNodeComponent,
+		'map': MapNodeComponent
 	};
 
 	// Local UI state
@@ -182,7 +184,7 @@
 		return screenPointToFlowPosition(centerScreenPoint);
 	}
 
-	function handleAddNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm' | 'subflow') {
+	function handleAddNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm' | 'subflow' | 'map') {
 		const position = getCanvasCenterPosition() ?? undefined;
 		flowStore.addNode(type, position);
 	}
@@ -336,6 +338,7 @@
 			onAddRouterNode={() => handleAddNode('router')}
 			onAddLlmNode={() => handleAddNode('llm')}
 			onAddSubFlowNode={() => handleAddNode('subflow')}
+			onAddMapNode={() => handleAddNode('map')}
 			onSave={saveFlow}
 			onRun={runFlow}
 			onOpenHistory={() => historyPanelOpen = true}

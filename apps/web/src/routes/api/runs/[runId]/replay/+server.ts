@@ -123,9 +123,9 @@ function buildJobFromNode(node: any, runId: string, inputData: any): any {
         node: {
           type: 'HTTP',
           data: {
-            url: node.data.url || '',
-            method: node.data.method || 'GET',
-            headers: node.data.headers || {},
+          url: node.data.url || '',
+          method: node.data.method || 'GET',
+          headers: node.data.headers || {},
             body: node.data.body || null,
           },
         },
@@ -136,7 +136,7 @@ function buildJobFromNode(node: any, runId: string, inputData: any): any {
         node: {
           type: 'CODE',
           data: {
-            code: node.data.code || '',
+          code: node.data.code || '',
             inputs: node.data.inputs || null,
           },
         },
@@ -149,7 +149,7 @@ function buildJobFromNode(node: any, runId: string, inputData: any): any {
           type: 'DELAY',
           data: {
             duration_ms: node.data.delayMs || 5000,
-            duration_str: node.data.delayStr,
+          duration_str: node.data.delayStr,
           },
         },
       };
@@ -160,8 +160,8 @@ function buildJobFromNode(node: any, runId: string, inputData: any): any {
         node: {
           type: 'WEBHOOKWAIT',
           data: {
-            timeout_ms: node.data.timeoutMs || 7 * 24 * 60 * 60 * 1000,
-            timeout_str: node.data.timeoutStr,
+          timeout_ms: node.data.timeoutMs || 7 * 24 * 60 * 60 * 1000,
+          timeout_str: node.data.timeoutStr,
             description: node.data.description || 'Wait for external event',
           },
         },

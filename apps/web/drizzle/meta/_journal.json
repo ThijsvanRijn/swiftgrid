@@ -29,6 +29,13 @@
       "when": 1764500000000,
       "tag": "0003_subflow_parent_linking",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1764600000000,
+      "tag": "0005_batch_operations",
+      "breakpoints": true
     }
   ]
 }

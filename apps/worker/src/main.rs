@@ -33,6 +33,20 @@ use tokio_util::sync::CancellationToken;
 const STREAM_JOBS: &str = "swiftgrid_stream";
 const STREAM_RESULTS: &str = "swiftgrid_results";
 
+// Performance: Set WORKER_VERBOSE=1 to enable debug logging in hot paths
+// Default is OFF for maximum performance
+fn is_verbose() -> bool {
+    std::env::var("WORKER_VERBOSE").map(|v| v == "1" || v == "true").unwrap_or(false)
+}
+
+macro_rules! verbose_log {
+    ($($arg:tt)*) => {
+        if is_verbose() {
+            println!($($arg)*);
+        }
+    };
+}
+
 // =============================================================================
 // MAIN
 // =============================================================================
@@ -45,8 +59,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://dev:dev123@localhost:5432/swiftgrid".to_string());
 
+    // High connection pool for concurrent Map operations
+    // Each worker needs: (concurrency × ~3 queries per child) + overhead
+    // Default 50 per worker, with longer acquire timeout
+    let pool_size = std::env::var("DB_POOL_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    
     let db_pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(pool_size)
+        .acquire_timeout(Duration::from_secs(30)) // Wait up to 30s for a connection
         .connect(&database_url)
         .await?;
 
@@ -79,12 +102,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         rt.block_on(async move {
             let js_runtime = AsyncRuntime::new().unwrap();
+            
+            // Set memory limit (16MB default, configurable via JS_MEMORY_LIMIT)
+            let memory_limit: usize = std::env::var("JS_MEMORY_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16 * 1024 * 1024);
+            js_runtime.set_memory_limit(memory_limit).await;
+            
+            // Set max stack size (256KB - prevents stack overflow attacks)
+            js_runtime.set_max_stack_size(256 * 1024).await;
+            
             let js_context = AsyncContext::full(&js_runtime).await.unwrap();
 
-            println!("✓ JS Sandbox Ready");
+            println!("✓ JS Sandbox Ready (memory limit: {}MB)", memory_limit / 1024 / 1024);
+
+            // Timeout in ms (default 5 seconds)
+            let timeout_ms: u64 = std::env::var("JS_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5000);
 
             while let Some(task) = js_receiver.recv().await {
+                // Set up interrupt handler with deadline for THIS execution
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+                
+                // The interrupt handler is called periodically during JS execution
+                // Return true to abort, false to continue
+                js_runtime.set_interrupt_handler(Some(Box::new(move || {
+                    std::time::Instant::now() > deadline
+                }))).await;
+                
                 let result = run_js_safely(&js_context, task.code, task.inputs).await;
+                
+                // Clear interrupt handler after execution
+                js_runtime.set_interrupt_handler(None::<Box<dyn FnMut() -> bool>>).await;
+                
                 let _ = task.responder.send(result);
             }
         });
@@ -130,7 +183,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             result = read_next_job(&mut con, group_name, &consumer_name) => {
                 if let Some((msg_id, job)) = result {
-                    println!(
+                    verbose_log!(
                         "Processing Node: {} (run: {:?}, attempt: {})",
                         job.id,
                         job.run_id,
@@ -197,7 +250,10 @@ async fn read_next_job(
 
                 match serde_json::from_str::<WorkerJob>(&payload_string) {
                     Ok(job) => return Some((msg_id, job)),
-                    Err(e) => eprintln!("Failed to parse WorkerJob: {}", e),
+                    Err(e) => {
+                        eprintln!("Failed to parse WorkerJob: {}", e);
+                        eprintln!("  Raw payload: {}", &payload_string[..payload_string.len().min(500)]);
+                    }
                 }
             }
         }
@@ -209,6 +265,24 @@ async fn read_next_job(
 // =============================================================================
 // JOB PROCESSING
 // =============================================================================
+
+/// Check if a node type is a "lifecycle event" that should bypass idempotency checks.
+/// 
+/// Lifecycle events update state of existing operations (resume, complete, step).
+/// They are inherently idempotent at the DB level (ON CONFLICT, atomic counters).
+/// 
+/// Execution events start new operations and MUST check idempotency to prevent
+/// duplicate HTTP calls, code execution, etc.
+fn is_lifecycle_event(node: &NodeType) -> bool {
+    matches!(
+        node,
+        NodeType::MapChildComplete(_)  // Updates batch counters
+            | NodeType::MapStep(_)     // Spawns more children (cursor-based, safe to retry)
+            | NodeType::SubFlowResume(_) // Resumes parent after child completes
+            | NodeType::DelayResume(_)   // Resumes after delay expires
+            | NodeType::WebhookResume(_) // Resumes after webhook received
+    )
+}
 
 async fn process_job(
     job: WorkerJob,
@@ -224,6 +298,13 @@ async fn process_job(
     let job_id = job.id.clone();
     let job_isolated = job.isolated;
     let run_id = job.run_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
+    
+    // Check if this is a lifecycle event (bypasses idempotency)
+    let is_lifecycle = is_lifecycle_event(&job.node);
+    
+    if is_lifecycle {
+        verbose_log!("Processing Lifecycle Event: {} (run: {:?})", job_id, job.run_id);
+    }
 
     // Get or create cancellation token for this run
     let cancel_token = if let Some(ref rid) = run_id {
@@ -236,7 +317,7 @@ async fn process_job(
     if let Some(ref rid) = run_id {
         // Check if already cancelled via token (fast path)
         if cancel_token.is_cancelled() {
-            println!("  -> Skipping node {} - run {} is cancelled (token)", job_id, rid);
+            verbose_log!("  -> Skipping {} - run {} is cancelled (token)", job_id, rid);
             ack_message(&redis_client, &group_name, &msg_id).await;
             return;
         }
@@ -251,29 +332,32 @@ async fn process_job(
         
         if let Ok(Some((status,))) = status_result {
             if status == "cancelled" || status == "failed" {
-                println!("  -> Skipping node {} - run {} is {}", job_id, rid, status);
+                verbose_log!("  -> Skipping {} - run {} is {}", job_id, rid, status);
                 ack_message(&redis_client, &group_name, &msg_id).await;
                 return;
             }
         }
 
         // Idempotency check: skip if this exact attempt already completed
-        // Prevents duplicate execution after worker crash (post-execution, pre-ACK)
-        match has_node_completed(&db_pool, rid, &job_id, job.retry_count).await {
-            Ok(true) => {
-                println!(
-                    "  -> Skipping node {} (attempt {}) - already executed (idempotency)",
-                    job_id,
-                    job.retry_count + 1
-                );
-                ack_message(&redis_client, &group_name, &msg_id).await;
-                return;
+        // ONLY for execution events - lifecycle events bypass this check
+        // (they are inherently idempotent at the DB level)
+        if !is_lifecycle {
+            match has_node_completed(&db_pool, rid, &job_id, job.retry_count).await {
+                Ok(true) => {
+                    verbose_log!(
+                        "  -> Skipping node {} (attempt {}) - already executed (idempotency)",
+                        job_id,
+                        job.retry_count + 1
+                    );
+                    ack_message(&redis_client, &group_name, &msg_id).await;
+                    return;
+                }
+                Err(e) => {
+                    // Log but continue - better to risk duplicate than to stall
+                    eprintln!("  -> Warning: idempotency check failed: {}", e);
+                }
+                Ok(false) => {} // Normal case: proceed with execution
             }
-            Err(e) => {
-                // Log but continue - better to risk duplicate than to stall
-                eprintln!("  -> Warning: idempotency check failed: {}", e);
-            }
-            Ok(false) => {} // Normal case: proceed with execution
         }
     }
 
@@ -306,15 +390,62 @@ async fn process_job(
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_success = status >= 200 && status < 300;
-    let is_suspended = status == 202
+    
+    // Lifecycle events (MapChildComplete, MapStep, etc.) should NOT be treated as suspended
+    // They are internal state updates that return 202 but should just be ACKed and done
+    // Only actual "start of suspension" events (Map init, SubFlow spawn) should suspend
+    let is_suspended = !is_lifecycle && status == 202
         && body
             .as_ref()
-            .map(|b| b.get("suspended").is_some())
+            .map(|b| b.get("suspended").is_some() || b.get("batch_id").is_some())
             .unwrap_or(false);
+
+    // Handle lifecycle events (MapChildComplete, MapStep, Resume, etc.)
+    // These are internal state updates - just publish progress to SSE and ACK
+    if is_lifecycle {
+        // Publish progress update to SSE (so UI can update progress bar)
+        let receipt = ExecutionResult {
+            node_id: job_id.clone(),
+            run_id: job.run_id.clone(),
+            status_code: status,
+            body: body.clone(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            duration_ms,
+            isolated: true, // Don't trigger downstream from frontend
+        };
+
+        if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+            if let Ok(receipt_json) = serde_json::to_string(&receipt) {
+                let _: RedisResult<String> = con
+                    .xadd(STREAM_RESULTS, "*", &[("payload", receipt_json)])
+                    .await;
+            }
+        }
+        
+        // Check if this lifecycle event completed the batch (status 200 = batch done)
+        if status == 200 && !is_success {
+            // Error case - batch failed
+            verbose_log!("  -> Lifecycle event: batch failed");
+        } else if status == 200 {
+            // Success case - batch completed, notify orchestrator to schedule downstream
+            verbose_log!("  -> Lifecycle event: batch completed, notifying orchestrator");
+            if let Some(ref rid) = run_id {
+                notify_orchestrator(rid, &job_id, true).await;
+            }
+        } else {
+            // Progress update (202) - just ACK (silent for performance)
+        }
+        
+        ack_message(&redis_client, &group_name, &msg_id).await;
+        return;
+    }
 
     // Handle cancelled nodes
     if was_cancelled {
-        println!("  -> Node {} cancelled", job_id);
+        verbose_log!("  -> Node {} cancelled", job_id);
         if let Some(ref rid) = run_id {
             let _ = log_event_with_retry(
                 &db_pool,
@@ -360,9 +491,25 @@ async fn process_job(
         return;
     }
 
-    // Handle suspended nodes (e.g., sub-flow waiting for child)
+    // Handle suspended nodes (e.g., sub-flow waiting for child, map waiting for iterations)
     if is_suspended {
-        println!("  -> Node suspended, waiting for external trigger");
+        verbose_log!("  -> Node suspended, waiting for external trigger");
+        
+        // Log NODE_SUSPENDED event so orchestrator knows not to re-schedule this node
+        if let Some(ref rid) = run_id {
+            let _ = log_event_with_retry(
+                &db_pool,
+                rid,
+                &job_id,
+                EventType::NodeSuspended,
+                Some(job.retry_count),
+                serde_json::json!({
+                    "duration_ms": duration_ms,
+                    "suspended_body": body
+                }),
+            )
+            .await;
+        }
         
         // Publish suspended result to SSE so UI shows "Waiting" badge
         let receipt = ExecutionResult {
@@ -573,6 +720,94 @@ async fn execute_node(
             let (status, body) = nodes::handle_resume(&data, false);
             (status, Some(body), false)
         }
+
+        NodeType::Map(data) => {
+            // Map/Iterator node - spawn children for each item
+            if let Some(run_id_str) = &run_id {
+                let run_uuid = match uuid::Uuid::parse_str(run_id_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        return (
+                            400,
+                            Some(serde_json::json!({ "error": format!("Invalid run_id: {}", e) })),
+                            false,
+                        );
+                    }
+                };
+                
+                match nodes::handle_map_init(db_pool, &run_uuid, job_id, &data, 0).await {
+                    Ok(result) => {
+                        // Note: third value is "was_cancelled", not "is_suspended"
+                        // Suspension is handled via status_code 202 check in process_job
+                        (result.status_code, result.body, false)
+                    }
+                    Err(e) => {
+                        eprintln!("  -> Map: Failed to initialize: {}", e);
+                        (500, Some(serde_json::json!({ "error": e.to_string() })), false)
+                    }
+                }
+            } else {
+                (
+                    400,
+                    Some(serde_json::json!({
+                        "error": "Map nodes require a run context (cannot run in isolated mode)",
+                    })),
+                    false,
+                )
+            }
+        }
+
+        NodeType::MapStep(data) => {
+            // Spawn next batch of children (lifecycle event - never "cancelled")
+            if let Some(run_id_str) = &run_id {
+                let run_uuid = match uuid::Uuid::parse_str(run_id_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        return (
+                            400,
+                            Some(serde_json::json!({ "error": format!("Invalid run_id: {}", e) })),
+                            false,
+                        );
+                    }
+                };
+                
+                match nodes::handle_map_step(db_pool, &run_uuid, job_id, &data).await {
+                    Ok(result) => (result.status_code, result.body, false), // Never cancelled
+                    Err(e) => {
+                        eprintln!("  -> MapStep: Failed: {}", e);
+                        (500, Some(serde_json::json!({ "error": e.to_string() })), false)
+                    }
+                }
+            } else {
+                (400, Some(serde_json::json!({ "error": "MapStep requires run context" })), false)
+            }
+        }
+
+        NodeType::MapChildComplete(data) => {
+            // A map child completed - record result and maybe spawn more (lifecycle event - never "cancelled")
+            if let Some(run_id_str) = &run_id {
+                let run_uuid = match uuid::Uuid::parse_str(run_id_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        return (
+                            400,
+                            Some(serde_json::json!({ "error": format!("Invalid run_id: {}", e) })),
+                            false,
+                        );
+                    }
+                };
+                
+                match nodes::handle_child_complete(db_pool, redis_client, &run_uuid, job_id, &data).await {
+                    Ok(result) => (result.status_code, result.body, false), // Never cancelled
+                    Err(e) => {
+                        eprintln!("  -> MapChildComplete: Failed: {}", e);
+                        (500, Some(serde_json::json!({ "error": e.to_string() })), false)
+                    }
+                }
+            } else {
+                (400, Some(serde_json::json!({ "error": "MapChildComplete requires run context" })), false)
+            }
+        }
     }
 }
 
@@ -610,6 +845,7 @@ async fn execute_code_node(
         code: data.code,
         inputs: data.inputs,
         responder: tx,
+        timeout_ms: None, // Use default timeout from SandboxConfig
     };
 
     if js_sender.send(task).await.is_err() {
@@ -762,6 +998,47 @@ async fn handle_final_result(
             let _: RedisResult<String> = con
                 .xadd(STREAM_RESULTS, "*", &[("payload", receipt_json)])
                 .await;
+        }
+    }
+    
+    // Call orchestrator to schedule next nodes (server-side, not relying on frontend)
+    // This is critical for child runs (sub-flows, map iterations) that have no frontend
+    if !isolated {
+        if let Some(rid) = run_id {
+            notify_orchestrator(rid, &job.id, is_success).await;
+        }
+    }
+}
+
+/// Notify the orchestrator that a node has completed.
+/// This triggers scheduling of dependent nodes and handles parent notifications for child runs.
+async fn notify_orchestrator(run_id: &Uuid, node_id: &str, success: bool) {
+    verbose_log!("  -> Notifying orchestrator: run={}, node={}, success={}", run_id, node_id, success);
+    
+    let base_url = std::env::var("ORCHESTRATOR_URL")
+        .unwrap_or_else(|_| "http://localhost:5173".to_string());
+    
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/orchestrate", base_url))
+        .json(&serde_json::json!({
+            "runId": run_id.to_string(),
+            "nodeId": node_id,
+            "success": success
+        }))
+        .send()
+        .await;
+    
+    match resp {
+        Ok(r) => {
+            if r.status().is_success() {
+                verbose_log!("  -> Orchestrator OK");
+            } else {
+                verbose_log!("  -> Orchestrator returned {}", r.status());
+            }
+        }
+        Err(e) => {
+            eprintln!("  -> Failed to notify orchestrator: {}", e);
         }
     }
 }

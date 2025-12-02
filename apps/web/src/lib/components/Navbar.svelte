@@ -20,6 +20,7 @@
 		onAddRouterNode: () => void;
 		onAddLlmNode: () => void;
 		onAddSubFlowNode: () => void;
+		onAddMapNode: () => void;
 		onSave: () => void;
 		onRun: () => void;
 		onOpenHistory: () => void;
@@ -38,8 +39,9 @@
 		onAddDelayNode, 
 		onAddWebhookWaitNode, 
 		onAddRouterNode, 
-		onAddLlmNode,
+		onAddLlmNode, 
 		onAddSubFlowNode,
+		onAddMapNode,
 		onSave, 
 		onRun, 
 		onOpenHistory, 
@@ -154,6 +156,12 @@
 			class="px-3 py-1.5 text-xs font-medium rounded-none text-violet-500 hover:text-violet-400 hover:bg-violet-500/10 transition-colors"
 		>
 			+ Sub-Flow
+		</button>
+		<button
+			onclick={onAddMapNode}
+			class="px-3 py-1.5 text-xs font-medium rounded-none text-orange-500 hover:text-orange-400 hover:bg-orange-500/10 transition-colors"
+		>
+			+ Map
 		</button>
 
 		<div class="w-px h-5 bg-border mx-1"></div>
