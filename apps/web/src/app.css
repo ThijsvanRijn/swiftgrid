@@ -1,5 +1,8 @@
-@import "tailwindcss";
+/* Variable fonts - self-hosted via NPM for zero FOUT/CLS */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
 
+@import "tailwindcss";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
@@ -52,6 +55,15 @@
   
   /* Canvas pattern dots */
   --pattern-dots: #d1d5db;
+  
+  /* TUI Console - Light mode: clean terminal aesthetic */
+  --tui-bg: #f8f8f8;
+  --tui-bg-elevated: #f0f0f0;
+  --tui-border: #e0e0e0;
+  --tui-border-bright: #d0d0d0;
+  --tui-text: #1a1a1a;
+  --tui-text-dim: #6b6b6b;
+  --tui-accent: #e8e8e8;
 }
 
 .dark {
@@ -100,9 +112,22 @@
   
   /* Canvas pattern dots */
   --pattern-dots: #2a2a2e;
+  
+  /* TUI Console - Dark mode: deep black terminal aesthetic */
+  --tui-bg: #09090b;
+  --tui-bg-elevated: #0f0f11;
+  --tui-border: #1f1f23;
+  --tui-border-bright: #2a2a2e;
+  --tui-text: #fafafa;
+  --tui-text-dim: #a1a1aa;
+  --tui-accent: #27272a;
 }
 
 @theme inline {
+  /* Typography - variable fonts */
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace;
+  
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -151,6 +176,15 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* Inter features: cv11 = tabular figures (aligned numbers in tables) */
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  
+  /* JetBrains Mono ligatures for code (=> !== === etc.) */
+  code, pre, .font-mono {
+    font-variant-ligatures: common-ligatures;
   }
   
   /* Custom scrollbar styling */

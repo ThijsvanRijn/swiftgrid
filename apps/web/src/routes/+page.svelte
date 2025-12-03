@@ -15,6 +15,7 @@
 	import { flowStore } from '$lib/stores/flowStore.svelte';
 	import { themeStore } from '$lib/stores/themeStore.svelte';
 	import { secretsStore } from '$lib/stores/secretsStore.svelte';
+	import { consoleStore } from '$lib/stores/consoleStore.svelte';
 
 	// Services
 	import { runFlow } from '$lib/services/executionService';
@@ -28,6 +29,8 @@
 	import RunHistoryPanel from '$lib/components/RunHistoryPanel.svelte';
 	import SchedulePanel from '$lib/components/SchedulePanel.svelte';
 	import VersionHistoryPanel from '$lib/components/VersionHistoryPanel.svelte';
+	import ConsolePanel from '$lib/components/console/ConsolePanel.svelte';
+	import ConsoleTabs from '$lib/components/console/ConsoleTabs.svelte';
 
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -308,95 +311,104 @@
 </script>
 
 <div class="h-screen w-full flex flex-col text-foreground font-sans bg-canvas">
-	<!-- Flow canvas as base layer -->
-	<div class="absolute inset-0" bind:this={flowWrapper}>
-		<SvelteFlow
-			bind:nodes={flowStore.nodes}
-			bind:edges={flowStore.edges}
-			bind:viewport={flowStore.viewport}
-			nodeTypes={nodeTypes}
-			colorMode={themeStore.isDark ? 'dark' : 'light'}
-			onnodeclick={onNodeClick}
-			onpaneclick={onPaneClick}
-			class="bg-canvas"
-		>
-			<FlowInit />
-			<Background patternColor="var(--pattern-dots)" gap={16} size={1.5} />
-			<Controls class="bg-panel! border-panel-border! rounded-none! shadow-float! m-3!" />
-		</SvelteFlow>
-	</div>
+	<!-- Main canvas area (fills space above console) -->
+	<div class="flex-1 relative min-h-0">
+		<!-- Flow canvas as base layer -->
+		<div class="absolute inset-0" bind:this={flowWrapper}>
+			<SvelteFlow
+				bind:nodes={flowStore.nodes}
+				bind:edges={flowStore.edges}
+				bind:viewport={flowStore.viewport}
+				nodeTypes={nodeTypes}
+				colorMode={themeStore.isDark ? 'dark' : 'light'}
+				onnodeclick={onNodeClick}
+				onpaneclick={onPaneClick}
+				class="bg-canvas"
+			>
+				<FlowInit />
+				<Background patternColor="var(--pattern-dots)" gap={16} size={1.5} />
+				<Controls class="bg-panel! border-panel-border! rounded-none! shadow-float! m-3!" />
+			</SvelteFlow>
+		</div>
 
-	<!-- Floating UI layer -->
-	<div class="absolute inset-0 pointer-events-none p-3 flex flex-col gap-3">
-		<!-- Top navbar -->
-		<Navbar
-			{sseStatus}
-			onAddHttpNode={() => handleAddNode('http')}
-			onAddCodeNode={() => handleAddNode('code')}
-			onAddDelayNode={() => handleAddNode('delay')}
-			onAddWebhookWaitNode={() => handleAddNode('webhook-wait')}
-			onAddRouterNode={() => handleAddNode('router')}
-			onAddLlmNode={() => handleAddNode('llm')}
-			onAddSubFlowNode={() => handleAddNode('subflow')}
-			onAddMapNode={() => handleAddNode('map')}
-			onSave={saveFlow}
-			onRun={runFlow}
-			onOpenHistory={() => historyPanelOpen = true}
-			onOpenSchedule={() => schedulePanelOpen = true}
-			onOpenVersions={() => versionsPanelOpen = true}
-			onPublish={handleOpenPublishDialog}
-			scheduleEnabled={scheduleConfig.enabled}
-			activeVersionNumber={flowStore.activeVersionNumber}
-			hasUnpublishedChanges={flowStore.hasUnpublishedChanges}
-		/>
+		<!-- Floating UI layer -->
+		<div class="absolute inset-0 pointer-events-none p-3 flex flex-col gap-3">
+			<!-- Top navbar -->
+			<Navbar
+				{sseStatus}
+				onAddHttpNode={() => handleAddNode('http')}
+				onAddCodeNode={() => handleAddNode('code')}
+				onAddDelayNode={() => handleAddNode('delay')}
+				onAddWebhookWaitNode={() => handleAddNode('webhook-wait')}
+				onAddRouterNode={() => handleAddNode('router')}
+				onAddLlmNode={() => handleAddNode('llm')}
+				onAddSubFlowNode={() => handleAddNode('subflow')}
+				onAddMapNode={() => handleAddNode('map')}
+				onSave={saveFlow}
+				onRun={runFlow}
+				onOpenHistory={() => historyPanelOpen = true}
+				onOpenSchedule={() => schedulePanelOpen = true}
+				onOpenVersions={() => versionsPanelOpen = true}
+				onPublish={handleOpenPublishDialog}
+				scheduleEnabled={scheduleConfig.enabled}
+				activeVersionNumber={flowStore.activeVersionNumber}
+				hasUnpublishedChanges={flowStore.hasUnpublishedChanges}
+			/>
 
-		<!-- Main content area with toolbar and sidebar -->
-		<div class="grow flex gap-3 overflow-hidden">
-			<!-- Left: Canvas toolbar -->
-			<CanvasToolbar />
-			
-			<!-- Spacer to push panels right -->
-			<div class="grow"></div>
-			
-			<!-- Right side panels -->
-			<div class="flex gap-3 h-full">
-				<!-- Version History Panel -->
-				<VersionHistoryPanel
-					isOpen={versionsPanelOpen}
-					onClose={() => versionsPanelOpen = false}
-					workflowId={flowStore.workflowId}
-					activeVersionId={flowStore.activeVersionId}
-					hasUnpublishedChanges={flowStore.hasUnpublishedChanges}
-					onRollback={handleRollback}
-					onRestoreDraft={handleRestoreDraft}
-					onDiscardDraft={handleDiscardDraft}
-					refreshTrigger={versionRefreshTrigger}
-				/>
+			<!-- Main content area with toolbar and sidebar -->
+			<div class="grow flex gap-3 overflow-hidden">
+				<!-- Left: Canvas toolbar -->
+				<CanvasToolbar />
+				
+				<!-- Spacer to push panels right -->
+				<div class="grow"></div>
+				
+				<!-- Right side panels -->
+				<div class="flex gap-3 h-full">
+					<!-- Version History Panel -->
+					<VersionHistoryPanel
+						isOpen={versionsPanelOpen}
+						onClose={() => versionsPanelOpen = false}
+						workflowId={flowStore.workflowId}
+						activeVersionId={flowStore.activeVersionId}
+						hasUnpublishedChanges={flowStore.hasUnpublishedChanges}
+						onRollback={handleRollback}
+						onRestoreDraft={handleRestoreDraft}
+						onDiscardDraft={handleDiscardDraft}
+						refreshTrigger={versionRefreshTrigger}
+					/>
 
-				<!-- Schedule Panel -->
-				<SchedulePanel
-					isOpen={schedulePanelOpen}
-					onClose={() => schedulePanelOpen = false}
-					schedule={scheduleConfig}
-					onSave={handleSaveSchedule}
-					workflowId={flowStore.workflowId}
-					workflowName={flowStore.workflowName}
-				/>
+					<!-- Schedule Panel -->
+					<SchedulePanel
+						isOpen={schedulePanelOpen}
+						onClose={() => schedulePanelOpen = false}
+						schedule={scheduleConfig}
+						onSave={handleSaveSchedule}
+						workflowId={flowStore.workflowId}
+						workflowName={flowStore.workflowName}
+					/>
 
-				<!-- Run History Panel -->
-				<RunHistoryPanel 
-					isOpen={historyPanelOpen}
-					onClose={() => historyPanelOpen = false}
-					onViewRun={handleViewRun}
-					workflowId={flowStore.workflowId}
-					workflowName={flowStore.workflowName}
-				/>
+					<!-- Run History Panel -->
+					<RunHistoryPanel 
+						isOpen={historyPanelOpen}
+						onClose={() => historyPanelOpen = false}
+						onViewRun={handleViewRun}
+						workflowId={flowStore.workflowId}
+						workflowName={flowStore.workflowName}
+					/>
 
-				<!-- Node Config Sidebar (shows when node selected) -->
-				<Sidebar />
+					<!-- Node Config Sidebar (shows when node selected) -->
+					<Sidebar />
+				</div>
 			</div>
 		</div>
 	</div>
+	
+	<!-- Bottom Console Panel -->
+	{#if consoleStore.isPanelOpen}
+		<ConsolePanel />
+	{/if}
+	<ConsoleTabs />
 
 	<!-- Publish Dialog -->
 	{#if publishDialogOpen}

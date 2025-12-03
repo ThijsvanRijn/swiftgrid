@@ -7,9 +7,10 @@ use rquickjs::{AsyncContext, AsyncRuntime};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use once_cell::sync::Lazy;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -32,6 +33,10 @@ use tokio_util::sync::CancellationToken;
 
 const STREAM_JOBS: &str = "swiftgrid_stream";
 const STREAM_RESULTS: &str = "swiftgrid_results";
+
+// Worker statistics for heartbeat
+static JOBS_PROCESSED: AtomicU64 = AtomicU64::new(0);
+static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 // Performance: Set WORKER_VERBOSE=1 to enable debug logging in hot paths
 // Default is OFF for maximum performance
@@ -66,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
-    
+
     let db_pool = PgPoolOptions::new()
         .max_connections(pool_size)
         .acquire_timeout(Duration::from_secs(30)) // Wait up to 30s for a connection
@@ -174,6 +179,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         scheduler::run(scheduler_redis, scheduler_db).await;
     });
 
+    // Spawn the heartbeat loop
+    let heartbeat_redis = redis_client.clone();
+    let heartbeat_worker_id = consumer_name.clone();
+    let heartbeat_in_flight = Arc::clone(&in_flight);
+    tokio::spawn(async move {
+        heartbeat_loop(heartbeat_redis, heartbeat_worker_id, heartbeat_in_flight).await;
+    });
+
     // Main job processing loop
     loop {
         tokio::select! {
@@ -203,6 +216,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tokio::spawn(async move {
                         process_job(job, h_client, r_client, pool, j_sender, msg_id, group, cancel_reg).await;
                         in_flight_clone.fetch_sub(1, Ordering::SeqCst);
+                        JOBS_PROCESSED.fetch_add(1, Ordering::Relaxed);
                     });
                 }
             }
@@ -330,12 +344,19 @@ async fn process_job(
         .fetch_optional(&db_pool)
         .await;
         
-        if let Ok(Some((status,))) = status_result {
-            if status == "cancelled" || status == "failed" {
+        match status_result {
+            Ok(Some((status,))) if status == "cancelled" || status == "failed" => {
                 verbose_log!("  -> Skipping {} - run {} is {}", job_id, rid, status);
                 ack_message(&redis_client, &group_name, &msg_id).await;
                 return;
             }
+            Err(e) => {
+                // TRANSIENT ERROR: Can't check status, don't ACK
+                eprintln!("  -> TRANSIENT ERROR: status check failed for {}: {}", job_id, e);
+                eprintln!("  -> NOT acknowledging - message will be redelivered");
+                return;
+            }
+            _ => {} // Status is ok or not cancelled - continue
         }
 
         // Idempotency check: skip if this exact attempt already completed
@@ -353,8 +374,15 @@ async fn process_job(
                     return;
                 }
                 Err(e) => {
-                    // Log but continue - better to risk duplicate than to stall
-                    eprintln!("  -> Warning: idempotency check failed: {}", e);
+                    // CRITICAL: Pool timeout = transient error
+                    // Do NOT ACK - let Redis consumer group redeliver this message
+                    // This gives us at-least-once semantics instead of at-most-once
+                    eprintln!(
+                        "  -> TRANSIENT ERROR: idempotency check failed for {}: {}",
+                        job_id, e
+                    );
+                    eprintln!("  -> NOT acknowledging - message will be redelivered");
+                    return; // Exit WITHOUT ack_message - Redis will redeliver after visibility timeout
                 }
                 Ok(false) => {} // Normal case: proceed with execution
             }
@@ -425,10 +453,16 @@ async fn process_job(
             }
         }
         
-        // Check if this lifecycle event completed the batch (status 200 = batch done)
-        if status == 200 && !is_success {
-            // Error case - batch failed
-            verbose_log!("  -> Lifecycle event: batch failed");
+        // Check if this lifecycle event succeeded or failed
+        if status == 500 {
+            // TRANSIENT ERROR: Lifecycle event failed (likely pool timeout)
+            // Do NOT ACK - let scheduler recovery pick it up for retry
+            eprintln!(
+                "  -> TRANSIENT ERROR: Lifecycle event {} failed with status 500",
+                job_id
+            );
+            eprintln!("  -> NOT acknowledging - message will be redelivered");
+            return; // Exit WITHOUT ack_message
         } else if status == 200 {
             // Success case - batch completed, notify orchestrator to schedule downstream
             verbose_log!("  -> Lifecycle event: batch completed, notifying orchestrator");
@@ -535,6 +569,24 @@ async fn process_job(
         
         ack_message(&redis_client, &group_name, &msg_id).await;
         return;
+    }
+
+    // Check for transient DB errors (status 500 with pool timeout indicators)
+    // These should NOT be ACKed - let scheduler recovery handle them
+    let is_transient_db_error = status == 500 && body
+        .as_ref()
+        .and_then(|b| b.get("error"))
+        .and_then(|e| e.as_str())
+        .map(|s| s.contains("pool timed out") || s.contains("Database error"))
+        .unwrap_or(false);
+
+    if is_transient_db_error {
+        eprintln!(
+            "  -> TRANSIENT DB ERROR: Node {} failed with pool timeout",
+            job_id
+        );
+        eprintln!("  -> NOT acknowledging - message will be redelivered");
+        return; // Exit WITHOUT ack_message
     }
 
     // Handle retry logic
@@ -1047,5 +1099,59 @@ async fn ack_message(redis_client: &redis::Client, group_name: &str, msg_id: &st
     if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
         let _: RedisResult<()> = con.xack(STREAM_JOBS, group_name, &[msg_id]).await;
         let _: RedisResult<()> = con.xdel(STREAM_JOBS, &[msg_id]).await;
+    }
+}
+
+// =============================================================================
+// WORKER HEARTBEAT
+// =============================================================================
+
+/// Sends periodic heartbeats to Redis so the frontend can display worker status.
+/// Each worker writes to a Redis hash with its current stats.
+async fn heartbeat_loop(
+    redis_client: redis::Client,
+    worker_id: String,
+    in_flight: Arc<AtomicUsize>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1)); // Fast heartbeat for real-time UI
+    
+    // Initialize start time
+    let _ = *START_TIME;
+    
+    loop {
+        interval.tick().await;
+        
+        // Gather stats
+        let jobs_processed = JOBS_PROCESSED.load(Ordering::Relaxed);
+        let current_jobs = in_flight.load(Ordering::SeqCst);
+        let uptime_secs = START_TIME.elapsed().as_secs();
+        
+        // Get memory usage
+        let memory_mb = memory_stats::memory_stats()
+            .map(|stats| stats.physical_mem / (1024 * 1024))
+            .unwrap_or(0) as u64;
+        
+        let heartbeat = serde_json::json!({
+            "worker_id": worker_id,
+            "status": "healthy",
+            "memory_mb": memory_mb,
+            "jobs_processed": jobs_processed,
+            "current_jobs": current_jobs,
+            "uptime_secs": uptime_secs,
+            "last_seen": chrono::Utc::now().to_rfc3339(),
+        });
+        
+        // Write to Redis hash (key: swiftgrid:workers, field: worker_id)
+        if let Ok(mut con) = redis_client.get_multiplexed_async_connection().await {
+            let _: RedisResult<()> = redis::cmd("HSET")
+                .arg("swiftgrid:workers")
+                .arg(&worker_id)
+                .arg(heartbeat.to_string())
+                .query_async(&mut con)
+                .await;
+            
+            // Set expiry on the hash field (Redis doesn't support per-field expiry,
+            // so we'll handle cleanup in the API by checking last_seen)
+        }
     }
 }

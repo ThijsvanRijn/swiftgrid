@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { db } from '$lib/server/db';
 import { secrets } from '$lib/server/db/schema';
+import { invalidateSecretsCache } from '$lib/server/secretsCache';
 import { desc } from 'drizzle-orm';
 
 // GET: List ALL keys (Safe for Frontend)
@@ -42,6 +43,9 @@ export async function POST({ request }) {
                 target: secrets.key, 
                 set: { value } 
             });
+
+        // Invalidate the secrets cache so new value is used immediately
+        invalidateSecretsCache();
 
         return json({ success: true, key: cleanKey });
     } catch (e) {

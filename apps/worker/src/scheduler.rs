@@ -28,15 +28,25 @@ const ACTIVE_JOBS_KEY: &str = "swiftgrid_stream";
 pub async fn run(redis_client: redis::Client, db_pool: PgPool) {
     println!("Scheduler started (polling every 1s)");
     println!("  - Delayed jobs: every 1s");
+    println!("  - Stale message recovery: every 5s");
     println!("  - Expired suspensions: every 10s");
     println!("  - Cron workflows: every 10s");
 
     let poll_interval = Duration::from_secs(1);
     let mut slow_check_counter = 0u32;
+    let mut recovery_counter = 0u32;
 
     loop {
         // Check delayed jobs every iteration (1s)
         process_delayed_jobs(&redis_client).await;
+
+        // Recover stale pending messages every 5 seconds
+        // This handles messages that weren't ACKed due to transient errors
+        recovery_counter += 1;
+        if recovery_counter >= 5 {
+            recovery_counter = 0;
+            recover_stale_pending_messages(&redis_client).await;
+        }
 
         // Check for slow tasks every 10 seconds
         slow_check_counter += 1;
@@ -54,6 +64,56 @@ pub async fn run(redis_client: redis::Client, db_pool: PgPool) {
         }
 
         tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Recover stale pending messages that weren't ACKed.
+/// 
+/// When a worker fails to ACK a message (e.g., due to pool timeout), the message
+/// stays in the Pending Entries List (PEL). This function uses XAUTOCLAIM to 
+/// reclaim messages that have been pending for more than 30 seconds.
+/// 
+/// This implements at-least-once delivery semantics - messages may be processed
+/// multiple times, but will never be lost due to transient errors.
+async fn recover_stale_pending_messages(redis_client: &redis::Client) {
+    let Ok(mut con) = redis_client.get_multiplexed_async_connection().await else {
+        return;
+    };
+
+    // Use XAUTOCLAIM to reclaim messages pending for more than 30 seconds
+    // This moves them from another consumer's PEL to ours, making them available for retry
+    // XAUTOCLAIM stream group consumer min-idle-time start [COUNT count]
+    let result: RedisResult<(String, Vec<(String, Vec<(String, String)>)>)> = redis::cmd("XAUTOCLAIM")
+        .arg(ACTIVE_JOBS_KEY)
+        .arg("workers_group")
+        .arg("scheduler_recovery")  // Use a dedicated consumer name for recovery
+        .arg("30000")  // 30 seconds min idle time
+        .arg("0-0")    // Start from beginning of PEL
+        .arg("COUNT")
+        .arg(10)       // Reclaim up to 10 messages at a time
+        .query_async(&mut con)
+        .await;
+
+    match result {
+        Ok((_, messages)) if !messages.is_empty() => {
+            println!("Scheduler: Recovering {} stale pending message(s)", messages.len());
+            
+            // Re-add these messages to the stream so they get picked up by workers
+            for (msg_id, fields) in messages {
+                // Extract the payload from the message fields
+                if let Some((_, payload)) = fields.iter().find(|(k, _)| k == "payload") {
+                    // Re-add to stream for reprocessing
+                    let _: RedisResult<String> = con
+                        .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", payload.as_str())])
+                        .await;
+                    
+                    // ACK the old message to remove it from PEL
+                    let _: RedisResult<()> = con.xack(ACTIVE_JOBS_KEY, "workers_group", &[&msg_id]).await;
+                }
+            }
+        }
+        Ok(_) => {} // No stale messages, which is good
+        Err(_) => {} // XAUTOCLAIM might fail if group doesn't exist yet, ignore
     }
 }
 
@@ -397,7 +457,7 @@ async fn check_stale_batches(pool: &PgPool, redis_client: &redis::Client) {
                 SELECT COUNT(*) FROM workflow_runs 
                 WHERE parent_run_id = $1 
                 AND status IN ('pending', 'running')
-                AND created_at < NOW() - INTERVAL '120 seconds'
+                AND created_at < NOW() - INTERVAL '30 seconds'
                 "#
             )
             .bind(&run_id)
@@ -418,7 +478,7 @@ async fn check_stale_batches(pool: &PgPool, redis_client: &redis::Client) {
                     SET status = 'failed', completed_at = NOW()
                     WHERE parent_run_id = $1 
                     AND status IN ('pending', 'running')
-                    AND created_at < NOW() - INTERVAL '120 seconds'
+                    AND created_at < NOW() - INTERVAL '30 seconds'
                     "#
                 )
                 .bind(&run_id)
@@ -561,7 +621,7 @@ async fn check_batch_timeouts(pool: &PgPool, redis_client: &redis::Client) {
         // Push the completion job to finalize results
         let _: RedisResult<String> = con
             .xadd(ACTIVE_JOBS_KEY, "*", &[("payload", timeout_job.to_string())])
-            .await;
+        .await;
     }
 }
 

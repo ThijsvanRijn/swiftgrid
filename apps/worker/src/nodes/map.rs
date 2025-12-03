@@ -28,7 +28,7 @@ impl std::fmt::Display for MapError {
             MapError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             MapError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
             MapError::Cancelled(msg) => write!(f, "Cancelled: {}", msg),
-        }
+    }
     }
 }
 
@@ -111,17 +111,61 @@ pub async fn handle_map_init(
     
     // Create batch_operations record
     let batch_id = Uuid::new_v4();
-    let concurrency = data.concurrency.min(50).max(1) as i32;
+    let concurrency = data.concurrency.min(200).max(1) as i32; // Raised from 50 to 200
     
     // Convert version_id string to UUID
     let version_uuid = data.version_id.as_ref().and_then(|v| Uuid::parse_str(v).ok());
     
+    // OPTIMIZATION: Fetch graph and depth ONCE here, cache in batch_operations
+    // This eliminates ~3 queries per spawn_children call later
+    let parent_depth: i32 = sqlx::query_scalar("SELECT COALESCE(depth, 0) FROM workflow_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| MapError::DatabaseError(e.to_string()))?;
+    
+    let child_depth = parent_depth + 1;
+    
+    // Fetch the workflow graph ONCE
+    let child_graph: serde_json::Value = if let Some(version_id) = &data.version_id {
+        let vid = Uuid::parse_str(version_id)
+            .map_err(|e| MapError::ExecutionError(format!("Invalid version_id: {}", e)))?;
+        sqlx::query_scalar("SELECT graph FROM workflow_versions WHERE id = $1")
+            .bind(vid)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| MapError::DatabaseError(e.to_string()))?
+    } else {
+        let active_version_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT active_version_id FROM workflows WHERE id = $1"
+        )
+        .bind(data.workflow_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| MapError::DatabaseError(e.to_string()))?;
+        
+        if let Some(vid) = active_version_id {
+            sqlx::query_scalar("SELECT graph FROM workflow_versions WHERE id = $1")
+                .bind(vid)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| MapError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query_scalar("SELECT graph FROM workflows WHERE id = $1")
+                .bind(data.workflow_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| MapError::DatabaseError(e.to_string()))?
+        }
+    };
+    
+    // Insert batch_operations with cached metadata
     sqlx::query(
         r#"
         INSERT INTO batch_operations (
             id, run_id, node_id, total_items, concurrency_limit, fail_fast, timeout_ms,
-            input_items, child_workflow_id, child_version_id, status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running')
+            input_items, child_workflow_id, child_version_id, child_graph, child_depth, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'running')
         "#
     )
     .bind(batch_id)
@@ -134,6 +178,8 @@ pub async fn handle_map_init(
     .bind(json!(data.items))
     .bind(data.workflow_id)
     .bind(version_uuid)
+    .bind(&child_graph)  // Cached graph
+    .bind(child_depth)   // Cached depth
     .execute(pool)
     .await
     .map_err(|e| MapError::DatabaseError(e.to_string()))?;
@@ -188,7 +234,7 @@ pub async fn handle_map_init(
 /// Handle child completion: record result, update counters, spawn next or complete
 pub async fn handle_child_complete(
     pool: &PgPool,
-    redis: &redis::Client,
+    _redis: &redis::Client, // No longer used - children spawned directly, not via MAPSTEP
     run_id: &Uuid,
     node_id: &str,
     data: &MapChildCompleteData,
@@ -203,8 +249,13 @@ pub async fn handle_child_complete(
         return complete_batch(pool, run_id, node_id, &batch_id, true, start).await;
     }
     
-    // Check if parent run has been cancelled
-    let run_cancelled = is_run_cancelled(pool, run_id).await;
+    // Check cancellation periodically (every ~10 completions) to reduce DB queries
+    // Use item_index % 10 as a cheap way to sample
+    let run_cancelled = if data.item_index % 10 == 0 {
+        is_run_cancelled(pool, run_id).await
+    } else {
+        false
+    };
     
     // Insert result into batch_results (append-only, no locking)
     // ON CONFLICT DO NOTHING means duplicates are silently ignored
@@ -228,9 +279,9 @@ pub async fn handle_child_complete(
     // Check if this was a duplicate (no row inserted)
     // If rows_affected() == 0, the ON CONFLICT triggered and we should skip counter updates
     if insert_result.rows_affected() == 0 {
-        // This is a duplicate MAPCHILDCOMPLETE - fetch current state and return
-        let (completed_count, failed_count, total_items): (i32, i32, i32) = sqlx::query_as(
-            "SELECT completed_count, failed_count, total_items FROM batch_operations WHERE id = $1"
+        // This is a duplicate MAPCHILDCOMPLETE - fetch current state
+        let (completed_count, failed_count, total_items, status): (i32, i32, i32, String) = sqlx::query_as(
+            "SELECT completed_count, failed_count, total_items, status FROM batch_operations WHERE id = $1"
         )
         .bind(batch_id)
         .fetch_one(pool)
@@ -239,6 +290,12 @@ pub async fn handle_child_complete(
         
         let total_finished = completed_count + failed_count;
         
+        // BUG FIX: Check if batch should be completed (might have been missed due to race)
+        if status == "running" && total_finished >= total_items {
+            // Batch is actually done but wasn't marked complete - fix it now
+            return complete_batch(pool, run_id, node_id, &batch_id, false, start).await;
+        }
+        
         // Return current progress (idempotent response)
         return Ok(ExecutionResult {
             node_id: node_id.to_string(),
@@ -246,7 +303,7 @@ pub async fn handle_child_complete(
             status_code: 202,
             body: Some(json!({
                 "batch_id": batch_id.to_string(),
-                "status": "running",
+                "status": status,
                 "completed": completed_count,
                 "failed": failed_count,
                 "total": total_items,
@@ -262,15 +319,18 @@ pub async fn handle_child_complete(
         });
     }
     
-    // Atomically update counters (only if we actually inserted a new result)
-    let (completed_count, failed_count, active_count, total_items, fail_fast, current_index, concurrency): 
-        (i32, i32, i32, i32, bool, i32, i32) = if data.success {
+    // Atomically update counters AND get all fields needed for spawning (eliminates ALL extra queries)
+    let (completed_count, failed_count, active_count, total_items, fail_fast, current_index, concurrency, 
+         workflow_id, version_id_str, input_items, child_graph, child_depth, batch_node_id): 
+        (i32, i32, i32, i32, bool, i32, i32, i32, String, serde_json::Value, serde_json::Value, i32, String) = if data.success {
         sqlx::query_as(
             r#"
             UPDATE batch_operations 
             SET completed_count = completed_count + 1, active_count = active_count - 1
             WHERE id = $1
-            RETURNING completed_count, failed_count, active_count, total_items, fail_fast, current_index, concurrency_limit
+            RETURNING completed_count, failed_count, active_count, total_items, fail_fast, current_index, 
+                      concurrency_limit, child_workflow_id, COALESCE(child_version_id::text, ''), input_items,
+                      COALESCE(child_graph, '{}'), COALESCE(child_depth, 1), node_id
             "#
         )
         .bind(batch_id)
@@ -283,7 +343,9 @@ pub async fn handle_child_complete(
             UPDATE batch_operations 
             SET failed_count = failed_count + 1, active_count = active_count - 1
             WHERE id = $1
-            RETURNING completed_count, failed_count, active_count, total_items, fail_fast, current_index, concurrency_limit
+            RETURNING completed_count, failed_count, active_count, total_items, fail_fast, current_index, 
+                      concurrency_limit, child_workflow_id, COALESCE(child_version_id::text, ''), input_items,
+                      COALESCE(child_graph, '{}'), COALESCE(child_depth, 1), node_id
             "#
         )
         .bind(batch_id)
@@ -291,6 +353,9 @@ pub async fn handle_child_complete(
         .await
         .map_err(|e| MapError::DatabaseError(e.to_string()))?
     };
+    
+    let version_id = if version_id_str.is_empty() { None } else { Some(version_id_str) };
+    let _ = batch_node_id; // Used for reference, node_id comes from function param
     
     let total_finished = completed_count + failed_count;
     
@@ -304,34 +369,46 @@ pub async fn handle_child_complete(
         return complete_batch(pool, run_id, node_id, &batch_id, false, start).await;
     }
     
-    // Spawn more children if we have capacity and items remaining (and not cancelled)
+    // Spawn more children DIRECTLY using CACHED metadata (0 extra queries!)
     if !run_cancelled && active_count < concurrency && current_index < total_items {
-        // Push MAP_STEP job to Redis
-        let step_job = json!({
-            "id": node_id,
-            "run_id": run_id.to_string(),
-            "node": {
-                "type": "MAPSTEP",
-                "data": {
-                    "batch_id": batch_id.to_string()
-                }
-            },
-            "retry_count": 0,
-            "max_retries": 0,
-            "isolated": false
-        });
+        // Calculate how many to spawn
+        let slots_available = (concurrency - active_count).max(0) as usize;
+        let items_remaining = (total_items - current_index).max(0) as usize;
+        let to_spawn = slots_available.min(items_remaining);
         
-        let mut conn = redis.get_multiplexed_async_connection().await
-            .map_err(|e| MapError::ExecutionError(format!("Redis error: {}", e)))?;
-        
-        redis::cmd("XADD")
-            .arg("swiftgrid_stream")
-            .arg("*")
-            .arg("payload")
-            .arg(step_job.to_string())
-            .query_async::<()>(&mut conn)
+        if to_spawn > 0 {
+            // Parse input items
+            let items: Vec<serde_json::Value> = serde_json::from_value(input_items.clone())
+                .map_err(|e| MapError::ExecutionError(format!("Invalid input_items: {}", e)))?;
+            
+            let version_uuid = version_id.as_ref().and_then(|v| Uuid::parse_str(v).ok());
+            
+            // Spawn using CACHED graph/depth (no DB queries!)
+            spawn_children_cached(
+                pool,
+                &batch_id,
+                run_id,
+                node_id,
+                workflow_id,
+                version_uuid,
+                &child_graph,
+                child_depth,
+                &items,
+                current_index as usize,
+                to_spawn,
+            ).await?;
+            
+            // Update batch state atomically
+            sqlx::query(
+                "UPDATE batch_operations SET current_index = $1, active_count = $2 WHERE id = $3"
+            )
+            .bind(current_index + to_spawn as i32)
+            .bind(active_count + to_spawn as i32)
+            .bind(batch_id)
+            .execute(pool)
             .await
-            .map_err(|e| MapError::ExecutionError(format!("Redis XADD error: {}", e)))?;
+            .map_err(|e| MapError::DatabaseError(e.to_string()))?;
+        }
     } else if run_cancelled {
         // Mark batch as cancelled if we detected cancellation
         cancel_batch(pool, &batch_id).await?;
@@ -635,10 +712,10 @@ async fn spawn_children(
     .bind(&parent_node_ids)
     .bind(&depths)
     .bind(child_runs.len() as i32)
-    .execute(pool)
-    .await
-    .map_err(|e| MapError::DatabaseError(e.to_string()))?;
-    
+        .execute(pool)
+        .await
+        .map_err(|e| MapError::DatabaseError(e.to_string()))?;
+        
     // Build jobs for each starting node of each child run
     // DIRECT REDIS PUSH: Skip HTTP orchestrator entirely
     let redis_client = redis::Client::open(
@@ -670,6 +747,117 @@ async fn spawn_children(
     }
     
     // Execute all job pushes in ONE network call
+    pipe.query_async::<()>(&mut conn).await
+        .map_err(|e| MapError::ExecutionError(format!("Redis pipeline error: {}", e)))?;
+    
+    Ok(())
+}
+
+/// Spawn child runs using CACHED metadata (0 DB queries for metadata!)
+/// 
+/// This is the optimized version called from handle_child_complete.
+/// All metadata (graph, depth, node_id) comes from the UPDATE RETURNING,
+/// eliminating 3-4 SELECT queries per spawn batch.
+async fn spawn_children_cached(
+    pool: &PgPool,
+    batch_id: &Uuid,
+    parent_run_id: &Uuid,
+    parent_node_id: &str,
+    workflow_id: i32,
+    version_uuid: Option<Uuid>,
+    graph: &serde_json::Value,
+    child_depth: i32,
+    items: &[serde_json::Value],
+    start_idx: usize,
+    count: usize,
+) -> Result<(), MapError> {
+    if count == 0 {
+        return Ok(());
+    }
+    
+    // Find starting nodes in the graph (computed, no DB query)
+    let starting_nodes = find_starting_nodes(graph);
+    
+    // Prepare all children data
+    let mut child_runs: Vec<(Uuid, usize, &serde_json::Value)> = Vec::with_capacity(count);
+    
+    for i in start_idx..(start_idx + count) {
+        if i >= items.len() {
+            break;
+        }
+        child_runs.push((Uuid::new_v4(), i, &items[i]));
+    }
+    
+    if child_runs.is_empty() {
+        return Ok(());
+    }
+    
+    // BATCH INSERT: Insert all child runs in a single query using UNNEST
+    let ids: Vec<Uuid> = child_runs.iter().map(|(id, _, _)| *id).collect();
+    let workflow_ids: Vec<i32> = vec![workflow_id; child_runs.len()];
+    let version_ids: Vec<Option<Uuid>> = vec![version_uuid; child_runs.len()];
+    let graphs: Vec<serde_json::Value> = vec![graph.clone(); child_runs.len()];
+    let input_datas: Vec<serde_json::Value> = child_runs.iter()
+        .map(|(_, i, item)| json!({
+            "item": item,
+            "index": i,
+            "batch_id": batch_id.to_string()
+        }))
+        .collect();
+    let parent_run_ids: Vec<Uuid> = vec![*parent_run_id; child_runs.len()];
+    let parent_node_ids: Vec<String> = vec![parent_node_id.to_string(); child_runs.len()];
+    let depths: Vec<i32> = vec![child_depth; child_runs.len()];
+    
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_runs (id, workflow_id, workflow_version_id, snapshot_graph, status, trigger, input_data, parent_run_id, parent_node_id, depth)
+        SELECT * FROM UNNEST($1::uuid[], $2::int[], $3::uuid[], $4::jsonb[], 
+                            ARRAY_FILL('running'::text, ARRAY[$9]), 
+                            ARRAY_FILL('map'::text, ARRAY[$9]),
+                            $5::jsonb[], $6::uuid[], $7::text[], $8::int[])
+        "#
+    )
+    .bind(&ids)
+    .bind(&workflow_ids)
+    .bind(&version_ids)
+    .bind(&graphs)
+    .bind(&input_datas)
+    .bind(&parent_run_ids)
+    .bind(&parent_node_ids)
+    .bind(&depths)
+    .bind(child_runs.len() as i32)
+    .execute(pool)
+    .await
+    .map_err(|e| MapError::DatabaseError(e.to_string()))?;
+    
+    // DIRECT REDIS PUSH with pipelining
+    let redis_client = redis::Client::open(
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    ).map_err(|e| MapError::ExecutionError(format!("Redis client error: {}", e)))?;
+    
+    let mut conn = redis_client.get_multiplexed_async_connection().await
+        .map_err(|e| MapError::ExecutionError(format!("Redis connection error: {}", e)))?;
+    
+    let mut pipe = redis::pipe();
+    
+    for (child_run_id, item_idx, item) in &child_runs {
+        let input_data = json!({
+            "item": item,
+            "index": item_idx,
+            "batch_id": batch_id.to_string()
+        });
+        
+        for start_node in &starting_nodes {
+            if let Some(job) = build_child_job(start_node, child_run_id, &input_data) {
+                pipe.cmd("XADD")
+                    .arg("swiftgrid_stream")
+                    .arg("*")
+                    .arg("payload")
+                    .arg(job);
+            }
+        }
+    }
+    
     pipe.query_async::<()>(&mut conn).await
         .map_err(|e| MapError::ExecutionError(format!("Redis pipeline error: {}", e)))?;
     
@@ -845,11 +1033,38 @@ async fn complete_batch(
         200
     };
     
-    // Calculate items per second throughput
+    // Calculate throughput and latency metrics
     let items_per_sec = if total_duration_secs > 0.0 {
         (total_items as f64 / total_duration_secs).round()
     } else {
         0.0
+    };
+    
+    // Get configured concurrency for the batch
+    let concurrency: i32 = sqlx::query_scalar("SELECT concurrency_limit FROM batch_operations WHERE id = $1")
+        .bind(batch_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(50);
+    
+    // Calculate effective latency per item (Little's Law: Latency = Concurrency / Throughput)
+    let avg_latency_ms = if items_per_sec > 0.0 {
+        ((concurrency as f64 / items_per_sec) * 1000.0).round() as u64
+    } else {
+        0
+    };
+    
+    // Suggest optimal concurrency based on current throughput
+    let suggested_concurrency = if avg_latency_ms > 0 {
+        // If latency is high (>500ms), suggest doubling concurrency
+        // If latency is low (<100ms), current concurrency is fine
+        if avg_latency_ms > 1000 {
+            (concurrency * 2).min(200)
+        } else {
+            concurrency
+        }
+    } else {
+        concurrency
     };
     
     Ok(ExecutionResult {
@@ -865,7 +1080,10 @@ async fn complete_batch(
                 "failed": failed_count,
                 "duration_ms": total_duration_ms,
                 "duration_secs": total_duration_secs,
-                "items_per_sec": items_per_sec
+                "items_per_sec": items_per_sec,
+                "avg_latency_ms": avg_latency_ms,
+                "concurrency_used": concurrency,
+                "suggested_concurrency": suggested_concurrency
             },
             "route_to": if failed_early || failed_count == total_items { "error" } else { "success" }
         })),

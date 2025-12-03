@@ -1,7 +1,8 @@
 import { json } from '@sveltejs/kit';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
-import { workflowRuns, runEvents, secrets, suspensions } from '$lib/server/db/schema';
+import { workflowRuns, runEvents, suspensions } from '$lib/server/db/schema';
+import { getSecretsMap } from '$lib/server/secretsCache';
 import { REDIS_STREAMS, EVENT_TYPES } from '@swiftgrid/shared';
 import { eq, and, inArray, isNull } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
@@ -521,9 +522,8 @@ export async function POST({ request }) {
         return json({ message: 'Dependencies not yet satisfied', scheduledNodes: [] });
     }
     
-    // 4. Fetch secrets for variable interpolation (nodeOutputs already built above)
-    const allSecrets = await db.select().from(secrets);
-    const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
+    // 4. Get secrets for variable interpolation (cached, 60s TTL)
+    const secretMap = await getSecretsMap();
     
     const scheduledNodeIds: string[] = [];
     

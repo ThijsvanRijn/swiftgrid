@@ -1,7 +1,8 @@
 import { json } from '@sveltejs/kit';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
-import { secrets, workflowRuns, runEvents } from '$lib/server/db/schema';
+import { workflowRuns, runEvents } from '$lib/server/db/schema';
+import { getSecretsMap } from '$lib/server/secretsCache';
 import { type WorkerJob, type EnhancedWorkerJob, REDIS_STREAMS, EVENT_TYPES } from '@swiftgrid/shared';
 import { env } from '$env/dynamic/private';
 
@@ -11,10 +12,10 @@ const redis = new Redis(env.REDIS_URL ?? 'redis://127.0.0.1:6379');
 /**
  * THE INJECTOR
  * Takes the payload and swaps {{$env.KEY}} with real database values.
+ * Uses cached secrets (60s TTL) to avoid DB query per job.
  */
 async function injectSecrets(job: EnhancedWorkerJob): Promise<EnhancedWorkerJob> {
-    const allSecrets = await db.select().from(secrets);
-    const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
+    const secretMap = await getSecretsMap();
 
     const processString = (str: string) => {
         return str.replace(/{{(.*?)}}/g, (match, variablePath) => {
@@ -152,9 +153,8 @@ async function handleStartRun(body: { startRun: true; workflowId?: number; graph
         payload: { startingNodes: startingNodes.map((n: any) => n.id) }
     });
     
-    // 5. Fetch secrets once for all nodes
-    const allSecrets = await db.select().from(secrets);
-    const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
+    // 5. Get secrets (cached, 60s TTL)
+    const secretMap = await getSecretsMap();
     
     // 6. Schedule starting nodes
     for (const node of startingNodes) {

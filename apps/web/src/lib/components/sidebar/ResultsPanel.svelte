@@ -251,7 +251,61 @@
 			{/if}
 
 			{#if flowStore.selectedNode.data.result}
-				<pre class="bg-[#0d1117] text-emerald-400 p-3 rounded-none text-xs font-mono overflow-x-auto max-h-[300px] overflow-y-auto">{JSON.stringify(flowStore.selectedNode.data.result, null, 2)}</pre>
+				{@const result = flowStore.selectedNode.data.result}
+				{@const body = result?.body}
+				{@const mapStats = body?.stats}
+				{@const hasMapResults = body?.results && Array.isArray(body.results)}
+				
+				{#if hasMapResults && mapStats}
+					<!-- Map node: Show stats prominently first -->
+					<div class="bg-sidebar-accent/50 border border-input p-3 space-y-3">
+						<!-- Stats Grid -->
+						<div class="grid grid-cols-2 gap-3">
+							<div class="bg-sidebar-accent p-2 text-center">
+								<div class="text-xl font-bold text-emerald-500">{mapStats.items_per_sec || '—'}</div>
+								<div class="text-[10px] text-muted-foreground">ITEMS/SEC</div>
+							</div>
+							<div class="bg-sidebar-accent p-2 text-center">
+								<div class="text-xl font-bold text-foreground">{mapStats.duration_secs?.toFixed(1) || '—'}s</div>
+								<div class="text-[10px] text-muted-foreground">DURATION</div>
+							</div>
+							<div class="bg-sidebar-accent p-2 text-center">
+								<div class="text-xl font-bold text-foreground">{mapStats.avg_latency_ms || '—'}ms</div>
+								<div class="text-[10px] text-muted-foreground">AVG LATENCY</div>
+							</div>
+							<div class="bg-sidebar-accent p-2 text-center">
+								<div class="text-xl font-bold text-foreground">{mapStats.concurrency_used || '—'}</div>
+								<div class="text-[10px] text-muted-foreground">CONCURRENCY</div>
+							</div>
+						</div>
+						
+						<!-- Progress summary -->
+						<div class="flex items-center justify-between text-xs">
+							<span class="text-emerald-500">{mapStats.completed} completed</span>
+							{#if mapStats.failed > 0}
+								<span class="text-red-500">{mapStats.failed} failed</span>
+							{/if}
+							<span class="text-muted-foreground">{mapStats.total} total</span>
+						</div>
+						
+						<!-- Suggestion -->
+						{#if mapStats.suggested_concurrency && mapStats.suggested_concurrency > mapStats.concurrency_used}
+							<div class="bg-amber-500/10 border border-amber-500/20 p-2 text-[10px] text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+								<span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+								Try concurrency {mapStats.suggested_concurrency} for better throughput
+							</div>
+						{/if}
+					</div>
+					
+					<!-- Results preview -->
+					<div class="text-[10px] text-muted-foreground mt-2">
+						Results Preview (first 3 of {body.results.length})
+					</div>
+					<pre class="bg-[#0d1117] text-emerald-400 p-3 rounded-none text-xs font-mono overflow-x-auto max-h-[200px] overflow-y-auto">{JSON.stringify(body.results.slice(0, 3), null, 2)}</pre>
+				{:else}
+					<!-- Regular result display -->
+					<pre class="bg-[#0d1117] text-emerald-400 p-3 rounded-none text-xs font-mono overflow-x-auto max-h-[300px] overflow-y-auto">{JSON.stringify(result, null, 2)}</pre>
+				{/if}
 			{:else if !isStreaming && currentChunks.length === 0}
 				<div class="py-8 px-4 border border-dashed border-input rounded-none text-center flex flex-col items-center gap-2">
 					<div class="w-10 h-10 rounded-full bg-sidebar-accent flex items-center justify-center">

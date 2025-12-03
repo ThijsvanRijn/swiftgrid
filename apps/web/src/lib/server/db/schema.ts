@@ -288,6 +288,10 @@ export const batchOperations = pgTable('batch_operations', {
   childWorkflowId: integer('child_workflow_id').notNull(),
   childVersionId: uuid('child_version_id'),  // Pinned version (null = use active)
   
+  // Cached metadata (populated once at batch creation to avoid repeated queries)
+  childGraph: jsonb('child_graph'),          // The workflow graph JSON (cached)
+  childDepth: integer('child_depth'),        // Parent depth + 1 (cached)
+  
   // State (updated atomically)
   currentIndex: integer('current_index').notNull().default(0),  // Cursor for spawning next batch
   activeCount: integer('active_count').notNull().default(0),    // Currently running children

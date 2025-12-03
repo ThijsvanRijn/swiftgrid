@@ -1,7 +1,8 @@
 import { json } from '@sveltejs/kit';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
-import { secrets, workflowRuns, runEvents } from '$lib/server/db/schema';
+import { workflowRuns, runEvents } from '$lib/server/db/schema';
+import { getSecretsMap } from '$lib/server/secretsCache';
 import { eq } from 'drizzle-orm';
 import { REDIS_STREAMS, EVENT_TYPES } from '@swiftgrid/shared';
 import { env } from '$env/dynamic/private';
@@ -63,9 +64,8 @@ export async function POST({ params }) {
         payload: { startingNodes: startingNodes.map((n: any) => n.id) }
     });
     
-    // 5. Fetch secrets for variable interpolation
-    const allSecrets = await db.select().from(secrets);
-    const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
+    // 5. Get secrets for variable interpolation (cached, 60s TTL)
+    const secretMap = await getSecretsMap();
     
     // 6. Schedule starting nodes
     const scheduledNodes: string[] = [];

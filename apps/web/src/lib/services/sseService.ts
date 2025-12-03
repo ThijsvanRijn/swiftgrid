@@ -125,12 +125,12 @@ function connect() {
         // so we only need to update the UI here, not trigger downstream scheduling
         import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
             const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
-            flowStore.updateNodeStatus(result.node_id, status as any, result.body);
+                flowStore.updateNodeStatus(result.node_id, status as any, result.body);
             
             // For isolated runs without run_id (test/preview mode), we still need to orchestrate from frontend
             if (!result.isolated && !isCancelled && !result.run_id) {
                 handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
-            }
+        }
         });
     });
 
@@ -219,12 +219,12 @@ function connect() {
         // so we only need to update the UI here, not trigger downstream scheduling
         import('$lib/stores/flowStore.svelte').then(({ flowStore }) => {
             const status = isCancelled ? 'cancelled' : (isSuccess ? 'success' : 'error');
-            flowStore.updateNodeStatus(result.node_id, status as any, result.body);
+                flowStore.updateNodeStatus(result.node_id, status as any, result.body);
             
             // For isolated runs without run_id (test/preview mode), we still need to orchestrate from frontend
             if (!result.isolated && !isCancelled && !result.run_id) {
                 handleExecutionResult(result.node_id, isSuccess, result.body, result.run_id);
-            }
+        }
         });
     };
 

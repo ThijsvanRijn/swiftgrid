@@ -67,50 +67,50 @@
       
       <!-- Status badge (always present to prevent layout shift) -->
       <div class="h-5 min-w-[42px]">
-        {#if isRunning || isSuspended}
-          <div class="flex items-center gap-1 px-1.5 bg-orange-500/15 rounded-sm h-5" title={`${completedCount}/${totalCount} completed`}>
-            <span class="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse shrink-0"></span>
-            <span class="text-[9px] font-medium text-orange-500 leading-none">{completedCount}/{totalCount}</span>
-          </div>
-        {:else if data.status === 'success'}
-          <div class="flex items-center gap-1 px-1.5 bg-emerald-500/15 rounded-sm h-5" title="All iterations completed">
-            <svg class="w-2.5 h-2.5 text-emerald-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-              <path d="M20 6L9 17l-5-5"/>
-            </svg>
-            <span class="text-[9px] font-medium text-emerald-500 leading-none">Done</span>
-          </div>
-        {:else if data.status === 'error'}
-          <div class="flex items-center gap-1 px-1.5 bg-red-500/15 rounded-sm h-5" title="Some iterations failed">
-            <svg class="w-2.5 h-2.5 text-red-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
-              <path d="M18 6 6 18M6 6l12 12"/>
-            </svg>
-            <span class="text-[9px] font-medium text-red-500 leading-none">Error</span>
-          </div>
-        {:else if data.status === 'cancelled'}
-          <div class="flex items-center gap-1 px-1.5 bg-amber-500/15 rounded-sm h-5" title="Cancelled">
-            <svg class="w-2.5 h-2.5 text-amber-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-              <circle cx="12" cy="12" r="10"/>
-              <path d="M8 12h8"/>
-            </svg>
-            <span class="text-[9px] font-medium text-amber-500 leading-none">Cancelled</span>
-          </div>
+      {#if isRunning || isSuspended}
+        <div class="flex items-center gap-1 px-1.5 bg-orange-500/15 rounded-sm h-5" title={`${completedCount}/${totalCount} completed`}>
+          <span class="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse shrink-0"></span>
+          <span class="text-[9px] font-medium text-orange-500 leading-none">{completedCount}/{totalCount}</span>
+        </div>
+      {:else if data.status === 'success'}
+        <div class="flex items-center gap-1 px-1.5 bg-emerald-500/15 rounded-sm h-5" title="All iterations completed">
+          <svg class="w-2.5 h-2.5 text-emerald-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+            <path d="M20 6L9 17l-5-5"/>
+          </svg>
+          <span class="text-[9px] font-medium text-emerald-500 leading-none">Done</span>
+        </div>
+      {:else if data.status === 'error'}
+        <div class="flex items-center gap-1 px-1.5 bg-red-500/15 rounded-sm h-5" title="Some iterations failed">
+          <svg class="w-2.5 h-2.5 text-red-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+            <path d="M18 6 6 18M6 6l12 12"/>
+          </svg>
+          <span class="text-[9px] font-medium text-red-500 leading-none">Error</span>
+        </div>
+      {:else if data.status === 'cancelled'}
+        <div class="flex items-center gap-1 px-1.5 bg-amber-500/15 rounded-sm h-5" title="Cancelled">
+          <svg class="w-2.5 h-2.5 text-amber-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M8 12h8"/>
+          </svg>
+          <span class="text-[9px] font-medium text-amber-500 leading-none">Cancelled</span>
+        </div>
         {:else}
           <!-- Idle state - show ready indicator -->
           <div class="flex items-center gap-1 px-1.5 bg-muted/50 rounded-sm h-5" title="Ready to run">
             <span class="w-1.5 h-1.5 rounded-full bg-muted-foreground/30 shrink-0"></span>
             <span class="text-[9px] font-medium text-muted-foreground/50 leading-none">Ready</span>
           </div>
-        {/if}
+      {/if}
       </div>
     </div>
   
     <!-- Progress bar (styled like a border, same height as panel border) -->
     <div class="h-px bg-border/50">
-      <div 
-        class="h-full bg-orange-500 transition-all duration-300"
+        <div 
+          class="h-full bg-orange-500 transition-all duration-300"
         style="width: {isRunning || isSuspended ? progressPercent : (data.status === 'success' ? 100 : 0)}%"
-      ></div>
-    </div>
+        ></div>
+      </div>
   
     <!-- Body -->
     <div class="px-3 py-3 space-y-2.5">

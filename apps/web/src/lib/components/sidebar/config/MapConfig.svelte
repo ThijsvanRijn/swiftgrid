@@ -216,18 +216,23 @@
 				id="mapConcurrency"
 				type="range"
 				min="1"
-				max="50"
+				max="200"
 				step="1"
-				value={flowStore.selectedNode.data.mapConcurrency || 5}
+				value={flowStore.selectedNode.data.mapConcurrency || 10}
 				oninput={(e) => flowStore.updateNodeData('mapConcurrency', parseInt(e.currentTarget.value))}
 				class="flex-1 h-2 bg-sidebar-accent/50 rounded-none appearance-none cursor-pointer accent-orange-500"
 			/>
-			<span class="w-8 text-sm font-mono text-foreground text-right">
-				{flowStore.selectedNode.data.mapConcurrency || 5}
-			</span>
+			<input
+				type="number"
+				min="1"
+				max="200"
+				value={flowStore.selectedNode.data.mapConcurrency || 10}
+				oninput={(e) => flowStore.updateNodeData('mapConcurrency', Math.min(200, Math.max(1, parseInt(e.currentTarget.value) || 10)))}
+				class="w-14 text-sm font-mono text-foreground text-center border border-input bg-sidebar-accent/50 rounded-none py-0.5"
+			/>
 		</div>
 		<span class="text-[10px] text-muted-foreground/60">
-			Maximum parallel executions (1-50). Higher = faster but more resource intensive.
+			Maximum parallel executions (1-200). Higher = faster. Match to your worker count × cores.
 		</span>
 	</div>
 

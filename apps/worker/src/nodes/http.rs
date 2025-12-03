@@ -38,6 +38,9 @@ pub async fn execute(
         ctx.progress("Sending request...").await;
     }
 
+    // Track request timing
+    let request_start = std::time::Instant::now();
+
     // Execute with cancellation support using tokio::select!
     let result = tokio::select! {
         biased; // Check cancellation first
@@ -53,6 +56,8 @@ pub async fn execute(
         result = req.send() => result
     };
 
+    let network_ms = request_start.elapsed().as_millis() as u64;
+
     match result {
         Ok(resp) => {
             let status = resp.status().as_u16();
@@ -60,9 +65,10 @@ pub async fn execute(
             // Stream progress: receiving
             if let Some(ctx) = stream_ctx {
                 ctx.progress(&format!(
-                    "Response: {} {}",
+                    "Response: {} {} ({}ms)",
                     status,
-                    resp.status().canonical_reason().unwrap_or("")
+                    resp.status().canonical_reason().unwrap_or(""),
+                    network_ms
                 ))
                 .await;
             }
@@ -75,9 +81,22 @@ pub async fn execute(
                 return (499, Some(serde_json::json!({ "error": "Request cancelled" })), true);
             }
 
+            let body_start = std::time::Instant::now();
             let text = resp.text().await.unwrap_or_default();
+            let body_ms = body_start.elapsed().as_millis() as u64;
+            
             let body = match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(json) => Some(json),
+                Ok(mut json) => {
+                    // Inject timing metadata
+                    if let Some(obj) = json.as_object_mut() {
+                        obj.insert("_timing".to_string(), serde_json::json!({
+                            "network_ms": network_ms,
+                            "body_read_ms": body_ms,
+                            "total_ms": network_ms + body_ms
+                        }));
+                    }
+                    Some(json)
+                },
                 Err(_) => {
                     if text.is_empty() {
                         None

@@ -2,7 +2,8 @@ import { json } from '@sveltejs/kit';
 import { createHmac, createHash } from 'crypto';
 import Redis from 'ioredis';
 import { db } from '$lib/server/db';
-import { workflows, workflowRuns, runEvents, secrets, webhookDeliveries, workflowVersions } from '$lib/server/db/schema';
+import { workflows, workflowRuns, runEvents, webhookDeliveries, workflowVersions } from '$lib/server/db/schema';
+import { getSecretsMap } from '$lib/server/secretsCache';
 import { eq, and } from 'drizzle-orm';
 import { REDIS_STREAMS, EVENT_TYPES } from '@swiftgrid/shared';
 import { env } from '$env/dynamic/private';
@@ -179,9 +180,8 @@ export async function POST({ params, request, getClientAddress }) {
         payload: { rootNodes: rootNodes.map((n: any) => n.id) }
     });
     
-    // Fetch secrets for injection
-    const allSecrets = await db.select().from(secrets);
-    const secretMap = new Map(allSecrets.map(s => [s.key, s.value]));
+    // Get secrets for injection (cached, 60s TTL)
+    const secretMap = await getSecretsMap();
     
     // Schedule root nodes
     for (const node of rootNodes) {

@@ -91,7 +91,7 @@ pub async fn run_js_with_config(
             // Set up interrupt handler to count instructions and stop infinite loops
             // Note: QuickJS interrupt callback is set at runtime level, not context
             // We'll use a simpler approach - check instruction count periodically
-            
+
             let input_json = serde_json::to_string(&inputs.unwrap_or(serde_json::json!({})))
                 .unwrap_or_else(|_| "{}".to_string());
 
