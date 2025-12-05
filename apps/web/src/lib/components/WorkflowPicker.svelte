@@ -21,6 +21,8 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let query = $state('');
+	let importing = $state(false);
+	let fileInput = $state<HTMLInputElement | null>(null);
 
 	const filtered = $derived.by(() => {
 		const q = query.trim().toLowerCase();
@@ -68,6 +70,62 @@
 		onClose();
 	}
 
+	async function handleExport(workflowId: number | null) {
+		if (!workflowId) {
+			error = 'No workflow selected to export';
+			return;
+		}
+		try {
+			const res = await fetch(`/api/workflows/${workflowId}/export`);
+			if (!res.ok) {
+				const data = await res.json();
+				throw new Error(data.error || 'Export failed');
+			}
+			const data = await res.json();
+			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `workflow-${workflowId}.json`;
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Export failed';
+		}
+	}
+
+	async function handleImport(files: FileList | null) {
+		if (!files || files.length === 0) return;
+		const file = files[0];
+		try {
+			importing = true;
+			const text = await file.text();
+			const payload = JSON.parse(text);
+			const res = await fetch('/api/workflows/import', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				throw new Error(data.error || 'Import failed');
+			}
+			await loadWorkflows();
+			// auto-select new workflow
+			if (data.workflowId) {
+				onSelect(data.workflowId);
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Import failed';
+		} finally {
+			importing = false;
+		}
+	}
+
+	function triggerImport() {
+		fileInput?.click();
+	}
+
 	$effect(() => {
 		if (isOpen) {
 			loadWorkflows();
@@ -92,15 +150,38 @@
 					<span class="text-[10px] text-muted-foreground">Select to load into editor</span>
 				</div>
 			</div>
-			<button
-				onclick={onClose}
-				class="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-				title="Close"
-			>
-				<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<path d="M18 6 6 18M6 6l12 12"/>
-				</svg>
-			</button>
+			<div class="flex items-center gap-2">
+				<button
+					onclick={() => handleExport(currentWorkflowId)}
+					class="px-2 py-1 text-[10px] font-medium rounded-sm bg-sidebar-accent/50 text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/70 transition-colors disabled:opacity-50"
+					disabled={!currentWorkflowId}
+				>
+					Export
+				</button>
+				<button
+					onclick={triggerImport}
+					class="px-2 py-1 text-[10px] font-medium rounded-sm bg-sidebar-accent/50 text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/70 transition-colors disabled:opacity-50"
+					disabled={importing}
+				>
+					{importing ? 'Importing...' : 'Import'}
+				</button>
+				<input
+					bind:this={fileInput}
+					type="file"
+					accept="application/json"
+					class="hidden"
+					onchange={(e) => handleImport((e.target as HTMLInputElement).files)}
+				/>
+				<button
+					onclick={onClose}
+					class="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+					title="Close"
+				>
+					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M18 6 6 18M6 6l12 12"/>
+					</svg>
+				</button>
+			</div>
 		</div>
 
 		<!-- Search -->

@@ -63,15 +63,15 @@
 	let historyPanelOpen = $state(false);
 	let schedulePanelOpen = $state(false);
 	let versionsPanelOpen = $state(false);
-let workflowPickerOpen = $state(false);
+	let workflowPickerOpen = $state(false);
 	let publishDialogOpen = $state(false);
 	let publishChangeSummary = $state('');
 	let versionRefreshTrigger = $state(0);
 
 // Health status
-let healthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
-let prevHealthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
-let healthInterval: ReturnType<typeof setInterval> | null = null;
+	let healthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
+	let prevHealthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
+	let healthInterval: ReturnType<typeof setInterval> | null = null;
 
 	// Schedule configuration (loaded from flowStore)
 	let scheduleConfig = $state({
@@ -89,13 +89,13 @@ let healthInterval: ReturnType<typeof setInterval> | null = null;
 		historyPanelOpen = false;
 	}
 
-function parseWorkflowId(value: string | null): number | null {
+	function parseWorkflowId(value: string | null): number | null {
 	if (!value) return null;
 	const parsed = parseInt(value, 10);
 	return Number.isNaN(parsed) ? null : parsed;
 }
 
-function setWorkflowIdInUrl(id: number | null) {
+	function setWorkflowIdInUrl(id: number | null) {
 	if (typeof window === 'undefined') return;
 	const url = new URL(window.location.href);
 	if (id) {
@@ -106,7 +106,7 @@ function setWorkflowIdInUrl(id: number | null) {
 	window.history.replaceState({}, '', url.toString());
 }
 
-async function loadWorkflowAndSchedule(workflowId?: number | null) {
+	async function loadWorkflowAndSchedule(workflowId?: number | null) {
 	await loadLatestFlow(workflowId);
 	await loadSchedule();
 	if (workflowId !== null && workflowId !== undefined) {
@@ -114,12 +114,12 @@ async function loadWorkflowAndSchedule(workflowId?: number | null) {
 	}
 }
 
-async function handleSelectWorkflow(id: number) {
+	async function handleSelectWorkflow(id: number) {
 	await loadWorkflowAndSchedule(id);
 	workflowPickerOpen = false;
 }
 
-async function checkHealth() {
+	async function checkHealth() {
 	try {
 		const res = await fetch('/api/health');
 		const data = await res.json();
@@ -250,39 +250,6 @@ async function checkHealth() {
 		}
 	};
 	});
-
-	// =================================================
-	// CANVAS HELPERS
-	// =================================================
-
-	function screenPointToFlowPosition(point: { x: number; y: number }): XYPosition {
-		if (!flowWrapper) {
-			return { x: point.x, y: point.y };
-		}
-
-		const bounds = flowWrapper.getBoundingClientRect();
-		return {
-			x: (point.x - bounds.left - flowStore.viewport.x) / flowStore.viewport.zoom,
-			y: (point.y - bounds.top - flowStore.viewport.y) / flowStore.viewport.zoom
-		};
-	}
-
-	function getCanvasCenterPosition(): XYPosition | null {
-		if (!flowWrapper) return null;
-
-		const bounds = flowWrapper.getBoundingClientRect();
-		const centerScreenPoint = {
-			x: bounds.left + bounds.width / 2,
-			y: bounds.top + bounds.height / 2
-		};
-
-		return screenPointToFlowPosition(centerScreenPoint);
-	}
-
-	function handleAddNode(type: 'http' | 'code' | 'delay' | 'webhook-wait' | 'router' | 'llm' | 'subflow' | 'map') {
-		const position = getCanvasCenterPosition() ?? undefined;
-		flowStore.addNode(type, position);
-	}
 
 	// =================================================
 	// VERSIONING
@@ -428,14 +395,6 @@ async function checkHealth() {
 			<!-- Top navbar -->
 			<Navbar
 				{sseStatus}
-				onAddHttpNode={() => handleAddNode('http')}
-				onAddCodeNode={() => handleAddNode('code')}
-				onAddDelayNode={() => handleAddNode('delay')}
-				onAddWebhookWaitNode={() => handleAddNode('webhook-wait')}
-				onAddRouterNode={() => handleAddNode('router')}
-				onAddLlmNode={() => handleAddNode('llm')}
-				onAddSubFlowNode={() => handleAddNode('subflow')}
-				onAddMapNode={() => handleAddNode('map')}
 				onSave={saveFlow}
 				onRun={runFlow}
 				onOpenHistory={() => historyPanelOpen = true}

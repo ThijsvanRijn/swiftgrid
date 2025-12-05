@@ -13,14 +13,6 @@
 
 	interface Props {
 		sseStatus: ConnectionStatus;
-		onAddHttpNode: () => void;
-		onAddCodeNode: () => void;
-		onAddDelayNode: () => void;
-		onAddWebhookWaitNode: () => void;
-		onAddRouterNode: () => void;
-		onAddLlmNode: () => void;
-		onAddSubFlowNode: () => void;
-		onAddMapNode: () => void;
 		onSave: () => void;
 		onRun: () => void;
 		onOpenHistory: () => void;
@@ -35,14 +27,6 @@
 
 	let { 
 		sseStatus, 
-		onAddHttpNode, 
-		onAddCodeNode, 
-		onAddDelayNode, 
-		onAddWebhookWaitNode, 
-		onAddRouterNode, 
-		onAddLlmNode, 
-		onAddSubFlowNode,
-		onAddMapNode,
 		onSave, 
 		onRun, 
 		onOpenHistory, 
@@ -127,60 +111,8 @@
 		</div>
 	</div>
 
-	<!-- Right: Actions -->
+	<!-- Right: Actions (cleaned: no direct node add buttons) -->
 	<div class="flex items-center gap-2">
-		<!-- Add node buttons -->
-		<button
-			onclick={onAddHttpNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-		>
-			+ HTTP
-		</button>
-		<button
-			onclick={onAddCodeNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-		>
-			+ Code
-		</button>
-		<button
-			onclick={onAddDelayNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-		>
-			+ Delay
-		</button>
-		<button
-			onclick={onAddWebhookWaitNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-		>
-			+ Webhook
-		</button>
-		<button
-			onclick={onAddRouterNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-		>
-			+ Router
-		</button>
-		<button
-			onclick={onAddLlmNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-cyan-500 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
-		>
-			+ LLM
-		</button>
-		<button
-			onclick={onAddSubFlowNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-violet-500 hover:text-violet-400 hover:bg-violet-500/10 transition-colors"
-		>
-			+ Sub-Flow
-		</button>
-		<button
-			onclick={onAddMapNode}
-			class="px-3 py-1.5 text-xs font-medium rounded-none text-orange-500 hover:text-orange-400 hover:bg-orange-500/10 transition-colors"
-		>
-			+ Map
-		</button>
-
-		<div class="w-px h-5 bg-border mx-1"></div>
-
 		<!-- Schedule button with global indicator -->
 		<div class="relative">
 			<button
