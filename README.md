@@ -200,7 +200,7 @@ Visit: [http://localhost:5173](http://localhost:5173)
 | -------- | ----------- |
 | `DATABASE_URL` | Postgres connection |
 | `REDIS_URL` | Redis connection |
-| `DB_POOL_SIZE` | Worker DB pool size |
+| `DB_POOL_SIZE` | Worker DB pool size (default 20). Keep below Postgres `max_connections` and leave headroom for web (defaults to 10). |
 | `JS_MEMORY_LIMIT` | QuickJS memory limit |
 | `JS_TIMEOUT_MS` | Execution timeout |
 | `WORKER_VERBOSE` | Debug logs |

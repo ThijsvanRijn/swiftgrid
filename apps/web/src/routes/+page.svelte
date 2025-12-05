@@ -241,12 +241,9 @@ async function checkHealth() {
 	checkHealth();
 	healthInterval = setInterval(checkHealth, 10_000);
 
-		return () => sseService.disconnect();
-	});
-
-$effect(() => {
-	// Cleanup interval on destroy
+	// Cleanup on destroy
 	return () => {
+		sseService.disconnect();
 		if (healthInterval) {
 			clearInterval(healthInterval);
 			healthInterval = null;

@@ -64,13 +64,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://dev:dev123@localhost:5432/swiftgrid".to_string());
 
-    // High connection pool for concurrent Map operations
+    // Cap pool to protect Postgres during local/dev spikes
     // Each worker needs: (concurrency × ~3 queries per child) + overhead
-    // Default 50 per worker, with longer acquire timeout
+    // Default 20 per worker (override with DB_POOL_SIZE)
     let pool_size = std::env::var("DB_POOL_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(50);
+        .unwrap_or(20);
 
     let db_pool = PgPoolOptions::new()
         .max_connections(pool_size)

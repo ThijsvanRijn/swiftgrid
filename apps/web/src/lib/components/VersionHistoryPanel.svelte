@@ -28,6 +28,7 @@
 
 	// Simple cache keyed by workflowId to avoid refetch on every open
 	let cache = $state<Record<number, Version[]>>({});
+	let cacheTimestamps = $state<Record<number, Date>>({});
 	
 	// Expanded version state (inline, no modal)
 	let expandedVersionId = $state<string | null>(null);
@@ -62,6 +63,7 @@
 		// Serve from cache when possible unless forced
 		if (!force && cache[workflowId]) {
 			versions = cache[workflowId];
+			lastLoadedAt = cacheTimestamps[workflowId] ?? null;
 			return;
 		}
 		
@@ -78,7 +80,9 @@
 			
 			versions = data.versions || [];
 			cache = { ...cache, [workflowId]: versions };
-			lastLoadedAt = new Date();
+			const now = new Date();
+			lastLoadedAt = now;
+			cacheTimestamps = { ...cacheTimestamps, [workflowId]: now };
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Unknown error';
 		} finally {

@@ -22,7 +22,7 @@
 	let error = $state<string | null>(null);
 	let query = $state('');
 
-	const filtered = $derived(() => {
+	const filtered = $derived.by(() => {
 		const q = query.trim().toLowerCase();
 		if (!q) return workflows;
 		return workflows.filter((w) =>
