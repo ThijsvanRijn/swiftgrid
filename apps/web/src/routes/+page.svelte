@@ -151,7 +151,7 @@ async function checkHealth() {
 		prevHealthStatus = { postgres: 'down', redis: 'down' };
 		healthStatus = { postgres: 'down', redis: 'down' };
 	}
-}
+	}
 
 	async function handleSaveSchedule(newSchedule: { enabled: boolean; cron: string; timezone: string; inputData: string; overlapMode: 'skip' | 'queue_one' | 'parallel'; nextRun?: string }) {
 		scheduleConfig = { ...newSchedule, nextRun: newSchedule.nextRun };
@@ -249,7 +249,7 @@ async function checkHealth() {
 			healthInterval = null;
 		}
 	};
-});
+	});
 
 	// =================================================
 	// CANVAS HELPERS

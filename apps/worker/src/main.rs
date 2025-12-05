@@ -80,6 +80,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("✓ Connected to PostgreSQL");
 
+    // Pool pressure monitor (logs when busy connections exceed 80% of max)
+    {
+        let db_pool = db_pool.clone();
+        tokio::spawn(async move {
+            let max = pool_size.max(1);
+            loop {
+                let size = db_pool.size();
+                let idle = db_pool.num_idle();
+                let busy = size.saturating_sub(idle);
+                if busy as f32 / max as f32 >= 0.8 {
+                    println!(
+                        "⚠️  DB pool pressure: busy={} idle={} max={}",
+                        busy,
+                        idle,
+                        max
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
+
     // Redis connection
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
