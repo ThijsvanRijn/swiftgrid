@@ -24,6 +24,7 @@
 		onSave: () => void;
 		onRun: () => void;
 		onOpenHistory: () => void;
+		onOpenWorkflows: () => void;
 		onOpenSchedule: () => void;
 		onOpenVersions: () => void;
 		onPublish: () => void;
@@ -45,6 +46,7 @@
 		onSave, 
 		onRun, 
 		onOpenHistory, 
+		onOpenWorkflows,
 		onOpenSchedule,
 		onOpenVersions,
 		onPublish,
@@ -97,6 +99,19 @@
 	<div class="flex items-center gap-3">
 		<h1 class="font-semibold text-base tracking-tight">SwiftGrid</h1>
 		
+		<!-- Workflow picker -->
+		<button
+			onclick={onOpenWorkflows}
+			class="px-3 py-1.5 text-xs font-medium rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors flex items-center gap-1.5"
+		>
+			<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<path d="M4 6h16"/>
+				<path d="M4 12h16"/>
+				<path d="M4 18h16"/>
+			</svg>
+			Workflows
+		</button>
+
 		<!-- Connection status -->
 		<div class="flex items-center gap-1.5" title={
 			sseStatus === 'connected' ? 'Receiving results from worker' :

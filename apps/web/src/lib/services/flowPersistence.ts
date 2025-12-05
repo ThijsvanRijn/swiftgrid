@@ -13,10 +13,16 @@ export function setFitViewCallback(callback: () => void) {
 	onNeedFitView = callback;
 }
 
-// Load the latest flow from the database
-export async function loadLatestFlow() {
+function persistLastWorkflowId(id: number | null | undefined) {
+	if (typeof localStorage === 'undefined') return;
+	if (id === null || id === undefined) return;
+	localStorage.setItem('lastWorkflowId', id.toString());
+}
+
+// Load a specific flow (or latest if none provided) from the database
+export async function loadLatestFlow(workflowId?: number | null) {
 	try {
-		const response = await fetch('/api/flows');
+		const response = await fetch(workflowId ? `/api/flows?workflowId=${workflowId}` : '/api/flows');
 		const data = await response.json();
 
 		if (data.graph) {
@@ -38,6 +44,7 @@ export async function loadLatestFlow() {
 				versionNumber
 			);
 			console.log('Flow loaded from DB! (id:', data.id, ', name:', data.name, ', version:', versionNumber ?? 'unpublished', ')');
+			persistLastWorkflowId(data.id);
 			
 			// If no meaningful viewport was saved, trigger fitView
 			if (!hasViewport && onNeedFitView) {
@@ -56,6 +63,10 @@ export async function loadLatestFlow() {
 	} catch (e) {
 		console.error('Load failed', e);
 	}
+}
+
+export async function loadWorkflowById(workflowId: number) {
+	return loadLatestFlow(workflowId);
 }
 
 // Restore node statuses from any active run (after page refresh)

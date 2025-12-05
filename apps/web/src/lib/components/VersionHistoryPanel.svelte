@@ -24,6 +24,10 @@
 	let versions = $state<Version[]>([]);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
+	let lastLoadedAt = $state<Date | null>(null);
+
+	// Simple cache keyed by workflowId to avoid refetch on every open
+	let cache = $state<Record<number, Version[]>>({});
 	
 	// Expanded version state (inline, no modal)
 	let expandedVersionId = $state<string | null>(null);
@@ -39,12 +43,31 @@
 		setTimeout(() => toast = null, 3000);
 	}
 
-	async function loadVersions() {
+	function formatLastLoaded(): string {
+		if (!lastLoadedAt) return '';
+		const diffMs = Date.now() - lastLoadedAt.getTime();
+		const diffMins = Math.floor(diffMs / 60000);
+		const diffHours = Math.floor(diffMs / 3600000);
+		const diffDays = Math.floor(diffMs / 86400000);
+
+		if (diffMins < 1) return 'Updated just now';
+		if (diffMins < 60) return `Updated ${diffMins}m ago`;
+		if (diffHours < 24) return `Updated ${diffHours}h ago`;
+		return `Updated ${diffDays}d ago`;
+	}
+
+	async function loadVersions(force = false) {
 		if (!workflowId) return;
+		
+		// Serve from cache when possible unless forced
+		if (!force && cache[workflowId]) {
+			versions = cache[workflowId];
+			return;
+		}
 		
 		loading = true;
 		error = null;
-		
+
 		try {
 			const res = await fetch(`/api/flows/${workflowId}/versions`);
 			const data = await res.json();
@@ -54,6 +77,8 @@
 			}
 			
 			versions = data.versions || [];
+			cache = { ...cache, [workflowId]: versions };
+			lastLoadedAt = new Date();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Unknown error';
 		} finally {
@@ -136,7 +161,18 @@
 		if (isOpen && workflowId) {
 			// Track refreshTrigger to reload when it changes
 			const _ = refreshTrigger;
-			loadVersions();
+			loadVersions(true);
+		}
+	});
+
+	// Invalidate cache when workflow changes
+	$effect(() => {
+		if (!isOpen && workflowId) {
+			expandedVersionId = null;
+		}
+		// If workflowId changed, clear cached expanded state
+		if (workflowId && !cache[workflowId]) {
+			expandedVersionId = null;
 		}
 	});
 	
@@ -159,16 +195,32 @@
 					<path d="M6 15l6 6 6-6"/>
 				</svg>
 				<span class="text-sm font-medium">Version History</span>
+				{#if lastLoadedAt}
+					<span class="text-[10px] text-muted-foreground">{formatLastLoaded()}</span>
+				{/if}
 			</div>
-			<button
-				onclick={onClose}
-				class="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-				title="Close"
-			>
-				<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<path d="M18 6 6 18M6 6l12 12"/>
-				</svg>
-			</button>
+			<div class="flex items-center gap-2">
+				<button
+					onclick={() => loadVersions(true)}
+					class="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors text-[10px]"
+					title="Refresh versions"
+					aria-label="Refresh versions"
+				>
+					<svg class="w-4 h-4 {loading ? 'animate-spin opacity-60' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+						<path d="M21 3v5h-5"/>
+					</svg>
+				</button>
+				<button
+					onclick={onClose}
+					class="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+					title="Close"
+				>
+					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M18 6 6 18M6 6l12 12"/>
+					</svg>
+				</button>
+			</div>
 		</div>
 
 		<!-- Version list -->

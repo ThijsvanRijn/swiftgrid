@@ -12,9 +12,10 @@ export async function GET() {
             name: workflows.name,
             activeVersionId: workflows.activeVersionId,
             createdAt: workflows.createdAt,
+            updatedAt: workflows.updatedAt,
         })
             .from(workflows)
-            .orderBy(desc(workflows.createdAt));
+            .orderBy(desc(workflows.updatedAt));
 
         // Get versions for each workflow
         const workflowsWithVersions = await Promise.all(
@@ -38,6 +39,8 @@ export async function GET() {
                     name: workflow.name,
                     activeVersionId: workflow.activeVersionId,
                     activeVersionNumber: activeVersion?.versionNumber || null,
+                    createdAt: workflow.createdAt,
+                    updatedAt: workflow.updatedAt,
                     versions,
                 };
             })

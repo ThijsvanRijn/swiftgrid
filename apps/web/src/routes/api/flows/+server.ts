@@ -3,14 +3,26 @@ import { db } from '$lib/server/db/index';
 import { workflows, workflowVersions } from '$lib/server/db/schema';
 import { desc, eq } from 'drizzle-orm';
 
-// GET: Fetch the latest saved workflow with version info
-export async function GET() {
+// GET: Fetch a workflow with version info
+// - If ?workflowId=<id> is provided, load that workflow
+// - Otherwise load the most recently updated workflow
+export async function GET({ url }) {
     try {
-        // Get the most recently created flow
-        const allFlows = await db.select()
+        const workflowIdParam = url.searchParams.get('workflowId');
+        const requestedId = workflowIdParam ? parseInt(workflowIdParam) : null;
+        const isValidId = requestedId !== null && !Number.isNaN(requestedId);
+
+        // Pick requested workflow or fallback to latest updated
+        const baseQuery = db.select()
             .from(workflows)
-            .orderBy(desc(workflows.createdAt))
+            .orderBy(desc(workflows.updatedAt))
             .limit(1);
+
+        const query = isValidId
+            ? baseQuery.where(eq(workflows.id, requestedId))
+            : baseQuery;
+
+        const allFlows = await query;
 
         if (allFlows.length === 0) {
             return json({ graph: null });

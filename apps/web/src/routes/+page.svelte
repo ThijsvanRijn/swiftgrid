@@ -31,6 +31,9 @@
 	import VersionHistoryPanel from '$lib/components/VersionHistoryPanel.svelte';
 	import ConsolePanel from '$lib/components/console/ConsolePanel.svelte';
 	import ConsoleTabs from '$lib/components/console/ConsoleTabs.svelte';
+	import WorkflowPicker from '$lib/components/WorkflowPicker.svelte';
+	import ToastStack from '$lib/components/ToastStack.svelte';
+	import { toastStore } from '$lib/stores/toastStore.svelte';
 
 	// Node components for SvelteFlow
 	import HttpRequestNodeComponent from '$lib/components/nodes/HttpRequestNode.svelte';
@@ -60,9 +63,15 @@
 	let historyPanelOpen = $state(false);
 	let schedulePanelOpen = $state(false);
 	let versionsPanelOpen = $state(false);
+let workflowPickerOpen = $state(false);
 	let publishDialogOpen = $state(false);
 	let publishChangeSummary = $state('');
 	let versionRefreshTrigger = $state(0);
+
+// Health status
+let healthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
+let prevHealthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
+let healthInterval: ReturnType<typeof setInterval> | null = null;
 
 	// Schedule configuration (loaded from flowStore)
 	let scheduleConfig = $state({
@@ -79,6 +88,70 @@
 		console.log('View run:', runId);
 		historyPanelOpen = false;
 	}
+
+function parseWorkflowId(value: string | null): number | null {
+	if (!value) return null;
+	const parsed = parseInt(value, 10);
+	return Number.isNaN(parsed) ? null : parsed;
+}
+
+function setWorkflowIdInUrl(id: number | null) {
+	if (typeof window === 'undefined') return;
+	const url = new URL(window.location.href);
+	if (id) {
+		url.searchParams.set('workflowId', id.toString());
+	} else {
+		url.searchParams.delete('workflowId');
+	}
+	window.history.replaceState({}, '', url.toString());
+}
+
+async function loadWorkflowAndSchedule(workflowId?: number | null) {
+	await loadLatestFlow(workflowId);
+	await loadSchedule();
+	if (workflowId !== null && workflowId !== undefined) {
+		setWorkflowIdInUrl(workflowId);
+	}
+}
+
+async function handleSelectWorkflow(id: number) {
+	await loadWorkflowAndSchedule(id);
+	workflowPickerOpen = false;
+}
+
+async function checkHealth() {
+	try {
+		const res = await fetch('/api/health');
+		const data = await res.json();
+		const next: typeof healthStatus = {
+			postgres: data.postgres === 'up' ? 'up' : 'down',
+			redis: data.redis === 'up' ? 'up' : 'down'
+		};
+
+		// Detect transitions and toast
+		if (prevHealthStatus.postgres === 'up' && next.postgres === 'down') {
+			toastStore.error('Postgres is down');
+		} else if (prevHealthStatus.postgres === 'down' && next.postgres === 'up') {
+			toastStore.success('Postgres is back up');
+		}
+
+		if (prevHealthStatus.redis === 'up' && next.redis === 'down') {
+			toastStore.error('Redis is down');
+		} else if (prevHealthStatus.redis === 'down' && next.redis === 'up') {
+			toastStore.success('Redis is back up');
+		}
+
+		prevHealthStatus = next;
+		healthStatus = next;
+	} catch (e) {
+		// Only toast once when failing to reach health endpoint
+		if (prevHealthStatus.postgres === 'up' || prevHealthStatus.redis === 'up') {
+			toastStore.error('Health check failed');
+		}
+		prevHealthStatus = { postgres: 'down', redis: 'down' };
+		healthStatus = { postgres: 'down', redis: 'down' };
+	}
+}
 
 	async function handleSaveSchedule(newSchedule: { enabled: boolean; cron: string; timezone: string; inputData: string; overlapMode: 'skip' | 'queue_one' | 'parallel'; nextRun?: string }) {
 		scheduleConfig = { ...newSchedule, nextRun: newSchedule.nextRun };
@@ -148,7 +221,15 @@
 
 	onMount(() => {
 		themeStore.init();
-		loadLatestFlow().then(() => loadSchedule());
+	if (typeof window !== 'undefined') {
+		const url = new URL(window.location.href);
+		const urlWorkflowId = parseWorkflowId(url.searchParams.get('workflowId'));
+		const storedWorkflowId = parseWorkflowId(localStorage.getItem('lastWorkflowId'));
+		const initialWorkflowId = urlWorkflowId ?? storedWorkflowId ?? undefined;
+		loadWorkflowAndSchedule(initialWorkflowId);
+	} else {
+		loadWorkflowAndSchedule();
+	}
 		secretsStore.load();
 
 		sseService.setStatusCallback((status) => {
@@ -156,8 +237,22 @@
 		});
 		sseService.connect();
 
+	// Health polling
+	checkHealth();
+	healthInterval = setInterval(checkHealth, 10_000);
+
 		return () => sseService.disconnect();
 	});
+
+$effect(() => {
+	// Cleanup interval on destroy
+	return () => {
+		if (healthInterval) {
+			clearInterval(healthInterval);
+			healthInterval = null;
+		}
+	};
+});
 
 	// =================================================
 	// CANVAS HELPERS
@@ -347,6 +442,7 @@
 				onSave={saveFlow}
 				onRun={runFlow}
 				onOpenHistory={() => historyPanelOpen = true}
+				onOpenWorkflows={() => workflowPickerOpen = true}
 				onOpenSchedule={() => schedulePanelOpen = true}
 				onOpenVersions={() => versionsPanelOpen = true}
 				onPublish={handleOpenPublishDialog}
@@ -365,6 +461,14 @@
 				
 				<!-- Right side panels -->
 				<div class="flex gap-3 h-full">
+					<!-- Workflow Picker -->
+					<WorkflowPicker
+						isOpen={workflowPickerOpen}
+						onClose={() => workflowPickerOpen = false}
+						onSelect={(id) => handleSelectWorkflow(id)}
+						currentWorkflowId={flowStore.workflowId}
+					/>
+
 					<!-- Version History Panel -->
 					<VersionHistoryPanel
 						isOpen={versionsPanelOpen}
@@ -409,6 +513,7 @@
 		<ConsolePanel />
 	{/if}
 	<ConsoleTabs />
+	<ToastStack />
 
 	<!-- Publish Dialog -->
 	{#if publishDialogOpen}
