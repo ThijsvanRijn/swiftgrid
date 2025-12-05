@@ -7,6 +7,7 @@
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
 	import { onMount } from 'svelte';
+	import { goto, replaceState } from '$app/navigation';
 
 	// Shared app types
 	import type { AppNode } from '$lib/types/app';
@@ -68,7 +69,7 @@
 	let publishChangeSummary = $state('');
 	let versionRefreshTrigger = $state(0);
 
-// Health status
+	// Health status
 	let healthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
 	let prevHealthStatus = $state<{ postgres: 'up' | 'down'; redis: 'up' | 'down' }>({ postgres: 'up', redis: 'up' });
 	let healthInterval: ReturnType<typeof setInterval> | null = null;
@@ -103,7 +104,7 @@
 	} else {
 		url.searchParams.delete('workflowId');
 	}
-	window.history.replaceState({}, '', url.toString());
+	replaceState(url.pathname + url.search, {});
 }
 
 	async function loadWorkflowAndSchedule(workflowId?: number | null) {
@@ -247,7 +248,7 @@
 		if (healthInterval) {
 			clearInterval(healthInterval);
 			healthInterval = null;
-		}
+	}
 	};
 	});
 
@@ -402,6 +403,8 @@
 				onOpenSchedule={() => schedulePanelOpen = true}
 				onOpenVersions={() => versionsPanelOpen = true}
 				onPublish={handleOpenPublishDialog}
+				workflowId={flowStore.workflowId}
+				workflowName={flowStore.workflowName}
 				scheduleEnabled={scheduleConfig.enabled}
 				activeVersionNumber={flowStore.activeVersionNumber}
 				hasUnpublishedChanges={flowStore.hasUnpublishedChanges}

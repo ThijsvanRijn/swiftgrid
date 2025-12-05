@@ -24,7 +24,10 @@ export const workflows = pgTable('workflows', {
   scheduleOverlapMode: text('schedule_overlap_mode').default('skip'),  // 'skip', 'queue_one', 'parallel'
   
   createdAt: timestamp('created_at').defaultNow(),
-  updatedAt: timestamp('updated_at').defaultNow()
+  updatedAt: timestamp('updated_at').defaultNow(),
+
+  // Share link revocation version (kill switch)
+  shareVersion: integer('share_version').notNull().default(1)
 }, (table) => [
   index('idx_workflows_schedule').on(table.scheduleNextRun),
   index('idx_workflows_active_version').on(table.activeVersionId)

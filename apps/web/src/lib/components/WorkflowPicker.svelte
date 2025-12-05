@@ -23,6 +23,9 @@
 	let query = $state('');
 	let importing = $state(false);
 	let fileInput = $state<HTMLInputElement | null>(null);
+	let shareLink = $state<string | null>(null);
+	let sharing = $state(false);
+	let shareWarning = $state<{ urls: string[]; emails: string[] } | null>(null);
 
 	const filtered = $derived.by(() => {
 		const q = query.trim().toLowerCase();
@@ -126,6 +129,46 @@
 		fileInput?.click();
 	}
 
+	async function handleShare(workflowId: number | null) {
+		if (!workflowId) {
+			error = 'No workflow selected to share';
+			return;
+		}
+
+	// Pre-flight scan for URLs/emails
+	try {
+		const res = await fetch(`/api/workflows/${workflowId}/export`);
+		if (res.ok) {
+			const data = await res.json();
+			const graphText = JSON.stringify(data.workflow.graph ?? {});
+			const urlMatches = graphText.match(/https?:\/\/[^\s"']+/g) || [];
+			const emailMatches = graphText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+			shareWarning = {
+				urls: Array.from(new Set(urlMatches)),
+				emails: Array.from(new Set(emailMatches))
+			};
+		}
+	} catch {
+		// ignore scan errors
+	}
+
+		sharing = true;
+		try {
+			const res = await fetch(`/api/workflows/${workflowId}/share`, { method: 'POST' });
+			const data = await res.json();
+			if (!res.ok) {
+				throw new Error(data.error || 'Share link failed');
+			}
+			const absolute = new URL(data.shareUrl, window.location.origin).toString();
+			shareLink = absolute;
+			await navigator.clipboard?.writeText(absolute);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Share link failed';
+		} finally {
+			sharing = false;
+		}
+	}
+
 	$effect(() => {
 		if (isOpen) {
 			loadWorkflows();
@@ -164,6 +207,14 @@
 					disabled={importing}
 				>
 					{importing ? 'Importing...' : 'Import'}
+				</button>
+				<button
+					onclick={() => handleShare(currentWorkflowId)}
+					class="px-2 py-1 text-[10px] font-medium rounded-sm bg-sidebar-accent/50 text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/70 transition-colors disabled:opacity-50"
+					disabled={!currentWorkflowId || sharing}
+					title="Copy read-only share link (active version)"
+				>
+					{sharing ? 'Sharing...' : 'Share'}
 				</button>
 				<input
 					bind:this={fileInput}
@@ -267,7 +318,28 @@
 
 		<!-- Footer -->
 		<div class="px-3 py-2 border-t border-sidebar-border bg-sidebar-accent/30 text-[10px] text-muted-foreground">
-			{workflows.length} workflow{workflows.length === 1 ? '' : 's'}
+			<div class="flex items-center justify-between">
+				<span>{workflows.length} workflow{workflows.length === 1 ? '' : 's'}</span>
+				{#if shareLink}
+					<button
+						onclick={() => navigator.clipboard?.writeText(shareLink!)}
+						class="text-[10px] text-emerald-500 hover:text-emerald-400"
+					>
+						Copy link
+					</button>
+				{/if}
+			</div>
+			{#if shareWarning && (shareWarning.urls.length || shareWarning.emails.length)}
+				<div class="mt-2 text-[10px] text-amber-500 space-y-1">
+					<div class="font-medium">Heads up: hardcoded data detected</div>
+					{#if shareWarning.urls.length}
+						<div>URLs: {shareWarning.urls.join(', ')}</div>
+					{/if}
+					{#if shareWarning.emails.length}
+						<div>Emails: {shareWarning.emails.join(', ')}</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}

@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { workflows, workflowVersions } from '$lib/server/db/schema';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 
 type ExportedWorkflow = {
 	workflow: any;
@@ -33,7 +33,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				name: `${sourceWorkflow.name || 'Imported Workflow'}`,
 				graph: sourceWorkflow.graph ?? { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
 				webhookEnabled: false,
-				scheduleEnabled: false
+				scheduleEnabled: false,
+				shareVersion: 1
 			})
 			.returning();
 
@@ -62,7 +63,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				.set({
 					activeVersionId: newActiveVersionId
 				})
-				.where(workflows.id.eq(created.id));
+				.where(eq(workflows.id, created.id));
 		}
 
 		return json({

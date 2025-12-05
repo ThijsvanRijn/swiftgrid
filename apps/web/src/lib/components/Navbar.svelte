@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { themeStore } from '$lib/stores/themeStore.svelte';
+	import WorkflowActionsMenu from './WorkflowActionsMenu.svelte';
 
 	type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -20,6 +21,8 @@
 		onOpenSchedule: () => void;
 		onOpenVersions: () => void;
 		onPublish: () => void;
+		workflowId: number | null;
+		workflowName: string | null;
 		scheduleEnabled?: boolean;
 		activeVersionNumber?: number | null;
 		hasUnpublishedChanges?: boolean;
@@ -34,6 +37,8 @@
 		onOpenSchedule,
 		onOpenVersions,
 		onPublish,
+		workflowId,
+		workflowName,
 		scheduleEnabled = false,
 		activeVersionNumber = null,
 		hasUnpublishedChanges = false
@@ -95,7 +100,7 @@
 			</svg>
 			Workflows
 		</button>
-
+		
 		<!-- Connection status -->
 		<div class="flex items-center gap-1.5" title={
 			sseStatus === 'connected' ? 'Receiving results from worker' :
@@ -230,6 +235,9 @@
 		>
 			Run Flow
 		</button>
+
+		<!-- Share/Export/Import dropdown -->
+		<WorkflowActionsMenu {workflowId} {workflowName} />
 
 		<div class="w-px h-5 bg-border mx-1"></div>
 

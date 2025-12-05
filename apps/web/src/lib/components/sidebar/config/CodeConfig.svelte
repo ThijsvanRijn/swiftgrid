@@ -1,4 +1,5 @@
 <script lang="ts">
+	import MonacoLazy from '$lib/components/MonacoLazy.svelte';
 	import { flowStore } from '$lib/stores/flowStore.svelte';
 </script>
 
@@ -6,14 +7,15 @@
 	<!-- Code editor -->
 	<div class="flex flex-col gap-1.5">
 		<label for="code" class="text-[11px] font-medium text-muted-foreground">JavaScript Code</label>
-		<textarea
-			id="code"
-			value={flowStore.selectedNode.data.code}
-			oninput={(e) => flowStore.updateNodeData('code', e.currentTarget.value)}
-			class="w-full border border-input bg-[#0d1117] text-emerald-400 px-3 py-2.5 rounded-none text-xs font-mono min-h-[180px] focus:outline-none focus:ring-2 focus:ring-ring/50 transition-all resize-none"
-			placeholder={'return { value: 123 };'}
-			spellcheck="false"
-		></textarea>
+		<div class="border border-input bg-sidebar-accent/30">
+			<MonacoLazy
+				value={flowStore.selectedNode.data.code || ''}
+				language="javascript"
+				readOnly={false}
+				height="220px"
+				onChange={(val) => flowStore.updateNodeData('code', val)}
+			/>
+		</div>
 		<div class="text-[10px] text-muted-foreground/60">
 			Available: <code class="bg-sidebar-accent px-1 py-0.5 rounded text-foreground/80">INPUT</code> variable contains mapped data.
 		</div>
